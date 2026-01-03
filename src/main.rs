@@ -4,7 +4,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{self, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf, frame::FdFrame}, gpio::{Level, Output, Speed}, peripherals::{FDCAN1, IWDG1}, rcc, wdg::IndependentWatchdog
+    Config, bind_interrupts, can::{self, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf, frame::FdFrame}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, mode::Async, peripherals::{FDCAN1, IWDG1}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
 };
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, DynamicSender, Receiver}};
 use embassy_time::Timer;
@@ -47,6 +47,12 @@ const TM_CHANNEL_BUF_SIZE: usize = 5;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> = StaticCell::new();
 //static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> = StaticCell::new();
 
+// static paripherals
+static SPI: StaticCell<Spi<'static, Async>> = StaticCell::new();
+static CS: StaticCell<Output<'static>> = StaticCell::new();
+static INT1: StaticCell<ExtiInput<'static>> = StaticCell::new();
+static INT2: StaticCell<ExtiInput<'static>> = StaticCell::new();
+
 // can configuration
 const RX_BUF_SIZE: usize = 64;
 const TX_BUF_SIZE: usize = 64;
@@ -80,11 +86,8 @@ pub async fn tm_thread(mut can_sender: BufferedFdCanSender, tm_channel: Receiver
 pub async fn imu_thread(tm_sender: DynamicSender<'static, UpperSensorTMContainer>, mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>) {
     const IMU_LOOP_LEN_MS: u64 = 50;
     loop {
-        if let Ok((low, high)) = imu.read_accel_dual_raw().await {
-            let container = UpperSensorTMContainer::new(&tm::imu1::AccelLowRange, &low).unwrap();
-            tm_sender.send(container).await;
-
-            let container = UpperSensorTMContainer::new(&tm::imu1::AccelFullRange, &high).unwrap();
+        if let Ok(data) = imu.read_accel_raw().await {
+            let container = UpperSensorTMContainer::new(&tm::imu1::AccelFullRange, &data).unwrap();
             tm_sender.send(container).await;
         }
 
@@ -154,8 +157,33 @@ async fn main(spawner: Spawner) {
         RX_BUF.init(RxFdBuf::<RX_BUF_SIZE>::new()),
     );
 
+    // imu config
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = Hertz(1_000_000);
+    spi_config.mode = spi::Mode {
+        polarity: spi::Polarity::IdleLow,            // CPOL=0
+        phase: spi::Phase::CaptureOnFirstTransition, // CPHA=0
+    }; // => SPI Mode 0
+
+
+    let spi = SPI.init(Spi::new(
+        p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH2, spi_config,
+    ));
+
+    let cs = CS.init(Output::new(p.PB0, Level::High, Speed::High));
+
+    let int1 = INT1.init(ExtiInput::new(p.PA9, p.EXTI9, Pull::Down));
+
+    let int2 = INT2.init(ExtiInput::new(p.PA8, p.EXTI8, Pull::Down));
+
+    let mut lsm = Lsm6dsv32::new(spi, cs, int1, int2, true).await;
+    let _ = lsm.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92);
+    let _ = lsm.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92);
+    lsm.commit_config().await;
+
     spawner.must_spawn(petter(watchdog));
 
+    spawner.must_spawn(imu_thread(tm_channel.dyn_sender(), lsm));
     spawner.must_spawn(tm_thread(can_interface.writer(), tm_channel.receiver()));
     // spawner.must_spawn(tc_thread(can_interface.reader(), cmd_channel.sender()));
     
