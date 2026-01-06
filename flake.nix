@@ -1,5 +1,5 @@
 {
-  description = "embassy g0b1 flake";
+  description = "embassy h723 flake";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

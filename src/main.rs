@@ -4,13 +4,13 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{self, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf, frame::FdFrame}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, mode::Async, peripherals::{FDCAN1, IWDG1}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
+    Config, bind_interrupts, can::{self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf, frame::FdFrame}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, mode::Async, peripherals::{FDCAN1, IWDG1}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
 };
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, DynamicSender, Receiver}};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, DynamicSender, Receiver, Sender}};
 use embassy_time::Timer;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use static_cell::StaticCell;
-use south_common::{telemetry_container, TelemetryContainer, telemetry::upper_sensor as tm, can_config::CanPeriphConfig};
+use south_common::{telemetry_container, TMValue, TelemetryContainer, telecommands, types::Telecommand, TelemetryDefinition, telemetry::upper_sensor as tm, can_config::CanPeriphConfig};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -43,9 +43,9 @@ type UpperSensorTMContainer = telemetry_container!(tm);
 
 // static concurrency sync management types
 const TM_CHANNEL_BUF_SIZE: usize = 5;
-//const CMD_CHANNEL_BUF_SIZE: usize = 5;
+const CMD_CHANNEL_BUF_SIZE: usize = 5;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> = StaticCell::new();
-//static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> = StaticCell::new();
+static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> = StaticCell::new();
 
 // static paripherals
 static SPI: StaticCell<Spi<'static, Async>> = StaticCell::new();
@@ -87,6 +87,7 @@ pub async fn imu_thread(tm_sender: DynamicSender<'static, UpperSensorTMContainer
     const IMU_LOOP_LEN_MS: u64 = 50;
     loop {
         if let Ok(data) = imu.read_accel_raw().await {
+            println!("{}", data);
             let container = UpperSensorTMContainer::new(&tm::imu1::AccelFullRange, &data).unwrap();
             tm_sender.send(container).await;
         }
@@ -106,23 +107,23 @@ pub async fn imu_thread(tm_sender: DynamicSender<'static, UpperSensorTMContainer
 }
 
 // tc receiving task
-// #[embassy_executor::task]
-// pub async fn tc_thread(
-//     can_receiver: BufferedFdCanReceiver,
-//     tc_channel: Sender<'static, ThreadModeRawMutex, Telecommand, TM_CHANNEL_BUF_SIZE>
-//     ) {
-//     loop {
-//         match can_receiver.receive().await {
-//             Ok(envelope) => {
-//                 match Telecommand::parse(envelope.frame.data()) {
-//                     Ok(cmd) => tc_channel.send(cmd).await,
-//                     Err(e) => error!("error parsing tc {}", e),
-//                 }
-//             }
-//             Err(e) => error!("error in frame! {}", e),
-//         }
-//     }
-// }
+#[embassy_executor::task]
+pub async fn tc_thread(
+    can_receiver: BufferedFdCanReceiver,
+    tc_channel: Sender<'static, ThreadModeRawMutex, Telecommand, TM_CHANNEL_BUF_SIZE>
+    ) {
+    loop {
+        match can_receiver.receive().await {
+            Ok(envelope) => {
+                match Telecommand::from_bytes(envelope.frame.data()) {
+                    Ok(cmd) => tc_channel.send(cmd).await,
+                    Err(_) => error!("error parsing tc"),
+                }
+            }
+            Err(e) => error!("error in frame! {}", e),
+        }
+    }
+}
 
 
 /// program entry
@@ -139,18 +140,18 @@ async fn main(spawner: Spawner) {
 
     // TM channel setup
     let tm_channel = TMC.init(Channel::new());
-    //let cmd_channel = CMDC.init(Channel::new());
+    let cmd_channel = CMDC.init(Channel::new());
 
     // set can standby pin to low
     let _can_standby = Output::new(p.PA10, Level::Low, Speed::Low);
     //let _can_2_standby = Output::new(p.PB2, Level::High, Speed::Low);
 
     // -- CAN configuration
-    let can_configurator = CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs));
+    let mut can_configurator = CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs));
 
-    //can_configurator
-    //    .add_receive_topic(telecommands::Telecommand.id())
-    //    .unwrap();
+    can_configurator
+        .add_receive_topic(telecommands::Telecommand.id())
+        .unwrap();
 
     let can_interface = can_configurator.activate(
         TX_BUF.init(TxFdBuf::<TX_BUF_SIZE>::new()),
@@ -176,7 +177,7 @@ async fn main(spawner: Spawner) {
 
     let int2 = INT2.init(ExtiInput::new(p.PA8, p.EXTI8, Pull::Down));
 
-    let mut lsm = Lsm6dsv32::new(spi, cs, int1, int2, true).await;
+    let mut lsm = Lsm6dsv32::new(spi, cs, int1, int2, false).await;
     let _ = lsm.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92);
     let _ = lsm.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92);
     lsm.commit_config().await;
@@ -185,7 +186,7 @@ async fn main(spawner: Spawner) {
 
     spawner.must_spawn(imu_thread(tm_channel.dyn_sender(), lsm));
     spawner.must_spawn(tm_thread(can_interface.writer(), tm_channel.receiver()));
-    // spawner.must_spawn(tc_thread(can_interface.reader(), cmd_channel.sender()));
+    spawner.must_spawn(tc_thread(can_interface.reader(), cmd_channel.sender()));
     
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;
