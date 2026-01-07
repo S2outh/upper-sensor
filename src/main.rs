@@ -75,7 +75,9 @@ pub async fn tm_thread(mut can_sender: BufferedFdCanSender, tm_channel: Receiver
     loop {
         let container = tm_channel.receive().await;
         match FdFrame::new_standard(container.id(), container.bytes()) {
-            Ok(frame) => can_sender.write(frame).await,
+            Ok(frame) => {
+                can_sender.write(frame).await;
+            },
             Err(e) => error!("error constructing can message: {}", e),
         }
     }
@@ -86,9 +88,11 @@ pub async fn tm_thread(mut can_sender: BufferedFdCanSender, tm_channel: Receiver
 pub async fn imu_thread(tm_sender: DynamicSender<'static, UpperSensorTMContainer>, mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>) {
     const IMU_LOOP_LEN_MS: u64 = 50;
     loop {
-        if let Ok(data) = imu.read_accel_raw().await {
-            println!("{}", data);
-            let container = UpperSensorTMContainer::new(&tm::imu1::AccelFullRange, &data).unwrap();
+        if let Ok((low, full)) = imu.read_accel_dual_raw().await {
+            let container = UpperSensorTMContainer::new(&tm::imu1::AccelLowRange, &low).unwrap();
+            tm_sender.send(container).await;
+
+            let container = UpperSensorTMContainer::new(&tm::imu1::AccelFullRange, &full).unwrap();
             tm_sender.send(container).await;
         }
 
@@ -143,11 +147,11 @@ async fn main(spawner: Spawner) {
     let cmd_channel = CMDC.init(Channel::new());
 
     // set can standby pin to low
-    let _can_standby = Output::new(p.PA10, Level::Low, Speed::Low);
-    //let _can_2_standby = Output::new(p.PB2, Level::High, Speed::Low);
+    let _can_standby = Output::new(p.PE2, Level::Low, Speed::Low);
+    //let _can_2_standby = Output::new(p.PE3, Level::High, Speed::Low);
 
     // -- CAN configuration
-    let mut can_configurator = CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PA11, p.PA12, Irqs));
+    let mut can_configurator = CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
 
     can_configurator
         .add_receive_topic(telecommands::Telecommand.id())
@@ -178,6 +182,8 @@ async fn main(spawner: Spawner) {
     let int2 = INT2.init(ExtiInput::new(p.PA8, p.EXTI8, Pull::Down));
 
     let mut lsm = Lsm6dsv32::new(spi, cs, int1, int2, false).await;
+    lsm.config.accel.dual_channel = true;
+    lsm.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
     let _ = lsm.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92);
     let _ = lsm.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92);
     lsm.commit_config().await;
