@@ -38,6 +38,9 @@ fn get_rcc_config() -> rcc::Config {
     rcc_config
 }
 
+// general setup stuff
+const STARTUP_DELAY: u64 = 300;
+
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
 
@@ -138,6 +141,8 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(config);
     info!("Launching");
 
+    Timer::after_millis(STARTUP_DELAY).await;
+
     // independent watchdog with timeout 300 MS
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, 300_000);
     watchdog.unleash();
@@ -164,7 +169,7 @@ async fn main(spawner: Spawner) {
 
     // imu config
     let mut spi_config = spi::Config::default();
-    spi_config.frequency = Hertz(1_000_000);
+    spi_config.frequency = Hertz(3_000_000);
     spi_config.mode = spi::Mode {
         polarity: spi::Polarity::IdleLow,            // CPOL=0
         phase: spi::Phase::CaptureOnFirstTransition, // CPHA=0
