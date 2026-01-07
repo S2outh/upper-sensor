@@ -4,10 +4,11 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf, frame::FdFrame}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, mode::Async, peripherals::{FDCAN1, IWDG1}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
+    Config, bind_interrupts, can::{self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf, frame::FdFrame}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, i2c, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
 };
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, DynamicSender, Receiver, Sender}};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, DynamicSender, Receiver, Sender}, mutex::Mutex};
 use embassy_time::Timer;
+use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use static_cell::StaticCell;
 use south_common::{telemetry_container, TMValue, TelemetryContainer, telecommands, types::Telecommand, TelemetryDefinition, telemetry::upper_sensor as tm, can_config::CanPeriphConfig};
@@ -18,6 +19,9 @@ use {defmt_rtt as _, panic_probe as _};
 bind_interrupts!(struct Irqs {
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
     FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
+
+    I2C1_EV => i2c::EventInterruptHandler<I2C1>;
+    I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
 });
 
 
@@ -51,10 +55,7 @@ static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CH
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> = StaticCell::new();
 
 // static paripherals
-static SPI: StaticCell<Spi<'static, Async>> = StaticCell::new();
-static CS: StaticCell<Output<'static>> = StaticCell::new();
-static INT1: StaticCell<ExtiInput<'static>> = StaticCell::new();
-static INT2: StaticCell<ExtiInput<'static>> = StaticCell::new();
+static SPI: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async>>> = StaticCell::new();
 
 // can configuration
 const RX_BUF_SIZE: usize = 64;
@@ -86,26 +87,69 @@ pub async fn tm_thread(mut can_sender: BufferedFdCanSender, tm_channel: Receiver
     }
 }
 
-// imu polling task
+// baro
 #[embassy_executor::task]
-pub async fn imu_thread(tm_sender: DynamicSender<'static, UpperSensorTMContainer>, mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>) {
+pub async fn baro_thread(
+    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    mut baro: Baro<'static, I2C1, PB8, PB9, Irqs, DMA1_CH1, DMA1_CH2>
+) {
+    const BARO_LOOP_LEN_MS: u64 = 50;
+    loop {
+        match baro.read_out().await {
+            Ok(raw) => {
+                // let temp = raw.baro_temp_convert();
+                // let pressure = raw.baro_pressure_convert_pa();
+
+                let container = UpperSensorTMContainer::new(&tm::baro::Pressure, &raw.pressure_data).unwrap();
+                tm_sender.send(container).await;
+
+                let container = UpperSensorTMContainer::new(&tm::baro::Temp, &raw.temperature_data).unwrap();
+                tm_sender.send(container).await;
+            }
+            Err(e) => {
+                error!("error reading baro: {}", e);
+            }
+        }
+
+        Timer::after_millis(BARO_LOOP_LEN_MS).await;
+    }
+}
+
+// imu polling task
+#[embassy_executor::task(pool_size = 2)]
+pub async fn imu_thread(
+    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
+    accel_low_range_def: &'static dyn TelemetryDefinition,
+    accel_full_range_def: &'static dyn TelemetryDefinition,
+    gyro_def: &'static dyn TelemetryDefinition,
+    temp_def: &'static dyn TelemetryDefinition,
+) {
     const IMU_LOOP_LEN_MS: u64 = 50;
+
+    // config
+    imu.config.accel.dual_channel = true;
+    imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
+    let _ = imu.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92);
+    let _ = imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92);
+    imu.commit_config().await;
+
     loop {
         if let Ok((low, full)) = imu.read_accel_dual_raw().await {
-            let container = UpperSensorTMContainer::new(&tm::imu1::AccelLowRange, &low).unwrap();
+            let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
             tm_sender.send(container).await;
 
-            let container = UpperSensorTMContainer::new(&tm::imu1::AccelFullRange, &full).unwrap();
+            let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
             tm_sender.send(container).await;
         }
 
         if let Ok(data) = imu.read_gyro_raw().await {
-            let container = UpperSensorTMContainer::new(&tm::imu1::Gyro, &data).unwrap();
+            let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
             tm_sender.send(container).await;
         }
 
         if let Ok(data) = imu.read_temp_raw().await {
-            let container = UpperSensorTMContainer::new(&tm::imu1::Temp, &data).unwrap();
+            let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
             tm_sender.send(container).await;
         }
 
@@ -141,8 +185,6 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(config);
     info!("Launching");
 
-    Timer::after_millis(STARTUP_DELAY).await;
-
     // independent watchdog with timeout 300 MS
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, 300_000);
     watchdog.unleash();
@@ -166,8 +208,15 @@ async fn main(spawner: Spawner) {
         TX_BUF.init(TxFdBuf::<TX_BUF_SIZE>::new()),
         RX_BUF.init(RxFdBuf::<RX_BUF_SIZE>::new()),
     );
+    
+    // i2c/baro setup
+    let mut cfg = i2c::Config::default();
+    cfg.frequency = Hertz(200_000);
+    cfg.sda_pullup = true;
+    cfg.scl_pullup = true;
+    let baro = Baro::new(p.I2C1, p.PB8, p.PB9, Irqs, p.DMA1_CH1, p.DMA1_CH2, cfg);
 
-    // imu config
+    // spi/imu setup
     let mut spi_config = spi::Config::default();
     spi_config.frequency = Hertz(3_000_000);
     spi_config.mode = spi::Mode {
@@ -175,27 +224,30 @@ async fn main(spawner: Spawner) {
         phase: spi::Phase::CaptureOnFirstTransition, // CPHA=0
     }; // => SPI Mode 0
 
-
-    let spi = SPI.init(Spi::new(
+    let spi = SPI.init(Mutex::new(Spi::new(
         p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH2, spi_config,
-    ));
+    )));
 
-    let cs = CS.init(Output::new(p.PB0, Level::High, Speed::High));
+    let cs1 = Output::new(p.PB0, Level::High, Speed::High);
+    let int1_1 = ExtiInput::new(p.PA9, p.EXTI9, Pull::Down);
+    let int1_2 = ExtiInput::new(p.PA8, p.EXTI8, Pull::Down);
 
-    let int1 = INT1.init(ExtiInput::new(p.PA9, p.EXTI9, Pull::Down));
+    let cs2 = Output::new(p.PB1, Level::High, Speed::High);
+    let int2_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down);
+    let int2_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down);
 
-    let int2 = INT2.init(ExtiInput::new(p.PA8, p.EXTI8, Pull::Down));
-
-    let mut lsm = Lsm6dsv32::new(spi, cs, int1, int2, false).await;
-    lsm.config.accel.dual_channel = true;
-    lsm.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
-    let _ = lsm.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92);
-    let _ = lsm.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92);
-    lsm.commit_config().await;
+    let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
+    let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
 
     spawner.must_spawn(petter(watchdog));
 
-    spawner.must_spawn(imu_thread(tm_channel.dyn_sender(), lsm));
+    Timer::after_millis(STARTUP_DELAY).await;
+    // driver threads
+    spawner.must_spawn(imu_thread(tm_channel.dyn_sender(), imu1, &tm::imu1::AccelLowRange, &tm::imu1::AccelFullRange, &tm::imu1::Gyro, &tm::imu1::Temp));
+    spawner.must_spawn(imu_thread(tm_channel.dyn_sender(), imu2, &tm::imu2::AccelLowRange, &tm::imu2::AccelFullRange, &tm::imu2::Gyro, &tm::imu2::Temp));
+    spawner.must_spawn(baro_thread(tm_channel.dyn_sender(), baro));
+
+    // tmtc io threads
     spawner.must_spawn(tm_thread(can_interface.writer(), tm_channel.receiver()));
     spawner.must_spawn(tc_thread(can_interface.reader(), cmd_channel.sender()));
     
