@@ -733,7 +733,7 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 [[package]]
 name = "south-common"
 version = "0.2.0"
-source = "git+ssh://git@github.com/S2outh/south-common.git#d4e8783fd615d0a32fba6d6d6b309308d3e222d6"
+source = "git+ssh://git@github.com/S2outh/south-common.git#e62aff247adb5188a7791a8bb265741950fdbfad"
 dependencies = [
  "defmt 1.0.1",
  "embassy-stm32",

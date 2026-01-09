@@ -1,23 +1,15 @@
 #![no_std]
 #![no_main]
 
+mod dts_drv;
+
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts,
-    can::{
+    Config, bind_interrupts, can::{
         self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf,
         frame::FdFrame,
-    },
-    exti::ExtiInput,
-    gpio::{Level, Output, Pull, Speed},
-    i2c,
-    mode::Async,
-    peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9},
-    rcc,
-    spi::{self, Spi},
-    time::Hertz,
-    wdg::IndependentWatchdog,
+    }, dts::{self, Dts}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, i2c, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
@@ -33,6 +25,8 @@ use south_common::{
 };
 use static_cell::StaticCell;
 
+use crate::dts_drv::DtsDrv;
+
 use {defmt_rtt as _, panic_probe as _};
 
 // bind interrupts
@@ -42,6 +36,8 @@ bind_interrupts!(struct Irqs {
 
     I2C1_EV => i2c::EventInterruptHandler<I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
+    
+    DTS => dts::InterruptHandler;
 });
 
 /// config rcc
@@ -58,6 +54,7 @@ fn get_rcc_config() -> rcc::Config {
         divr: Some(rcc::PllDiv::DIV5),
     });
     rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q;
+    rcc_config.voltage_scale = rcc::VoltageScale::Scale1;
     rcc_config
 }
 
@@ -187,6 +184,22 @@ pub async fn imu_thread(
     }
 }
 
+// temperature
+#[embassy_executor::task]
+pub async fn dts_thread(
+    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    mut dts: DtsDrv<'static>
+) {
+    const DTS_LOOP_LEN_MS: u64 = 1000;
+    loop {
+        let temp = dts.read_tenth_deg().await;
+        let container = UpperSensorTMContainer::new(&tm::InternalTemperature, &temp).unwrap();
+        tm_sender.send(container).await;
+
+        Timer::after_millis(DTS_LOOP_LEN_MS).await;
+    }
+}
+
 // tc receiving task
 #[embassy_executor::task]
 pub async fn tc_thread(
@@ -247,6 +260,7 @@ async fn main(spawner: Spawner) {
     // spi/imu setup
     let mut spi_config = spi::Config::default();
     spi_config.frequency = Hertz(3_000_000);
+    spi_config.gpio_speed = Speed::High;
     spi_config.mode = spi::Mode {
         polarity: spi::Polarity::IdleLow,            // CPOL=0
         phase: spi::Phase::CaptureOnFirstTransition, // CPHA=0
@@ -267,11 +281,17 @@ async fn main(spawner: Spawner) {
     let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
     let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
 
+    // internal temperature sensor
+    let mut dts_config = dts::Config::default();
+    dts_config.sample_time = dts::SampleTime::ClockCycles15;
+    let dts = Dts::new(p.DTS, Irqs, dts_config);
+    let dts_drv = DtsDrv::new(dts, dts_config.sample_time);
+
     // debug leds
     // let mut green = Output::new(p.PD12, Level::Low, Speed::Medium);
-    let yellow = Output::new(p.PD13, Level::Low, Speed::Medium);
-    let red = Output::new(p.PD14, Level::Low, Speed::Medium);
-    let blue = Output::new(p.PD15, Level::Low, Speed::Medium);
+    let yellow = Output::new(p.PD13, Level::Low, Speed::High);
+    let red = Output::new(p.PD14, Level::Low, Speed::High);
+    let blue = Output::new(p.PD15, Level::Low, Speed::High);
 
     // -- Thread spawning
     spawner.must_spawn(petter(watchdog));
@@ -298,6 +318,7 @@ async fn main(spawner: Spawner) {
         &tm::imu2::Temp,
     ));
     spawner.must_spawn(baro_thread(tm_channel.dyn_sender(), baro, blue));
+    spawner.must_spawn(dts_thread(tm_channel.dyn_sender(), dts_drv));
 
     // tmtc io threads
     spawner.must_spawn(tm_thread(can_interface.writer(), tm_channel.receiver()));
