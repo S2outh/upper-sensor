@@ -156,27 +156,38 @@ pub async fn imu_thread(
     // config
     imu.config.accel.dual_channel = true;
     imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
-    let _ = imu.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92);
-    let _ = imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92);
+
+    unwrap!(imu.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92));
+    unwrap!(imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92));
+
     imu.commit_config().await;
 
     loop {
-        if let Ok((low, full)) = imu.read_accel_dual_raw().await {
-            let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
-            tm_sender.send(container).await;
+        match imu.read_accel_dual_raw().await {
+            Ok((low, full)) => {
+                let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
+                tm_sender.send(container).await;
 
-            let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
-            tm_sender.send(container).await;
+                let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
+                tm_sender.send(container).await;
+            },
+            Err(e) => error!("could not read accel: {}", e),
         }
 
-        if let Ok(data) = imu.read_gyro_raw().await {
-            let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
-            tm_sender.send(container).await;
+        match imu.read_gyro_raw().await {
+            Ok(data) => {
+                let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
+                tm_sender.send(container).await;
+            },
+            Err(e) => error!("could not read gyro: {}", e),
         }
 
-        if let Ok(data) = imu.read_temp_raw().await {
-            let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
-            tm_sender.send(container).await;
+        match imu.read_temp_raw().await {
+            Ok(data) => {
+                let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
+                tm_sender.send(container).await;
+            },
+            Err(e) => error!("could not read temp: {}", e),
         }
 
         led.toggle();
