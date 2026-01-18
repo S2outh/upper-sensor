@@ -1,11 +1,11 @@
 {
-  description = "embassy h723 flake";
+  description = "Rust/Embassy H723 Flake";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     fenix = {
-      url = "github:nix-community/fenix";
+      url = "github:nix-community/fenix/monthly";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -17,42 +17,34 @@
           inherit system;
           overlays = [ fenix.overlays.default ];
         };
+
+        rust-target = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
+
+        rust-toolchain = pkgs.fenix.combine [
+          (pkgs.fenix.latest.withComponents [
+            "cargo"
+            "rustc"
+            "rust-src"
+            "rustfmt"
+            "clippy"
+          ])
+
+          rust-target.rust-std
+        ];
       in
       {
-        devShells.default =
-        let
-          toolchain = pkgs.fenix.toolchainOf {
-            channel = "nightly";
-            date = "2025-12-22";
-            sha256 = "sha256-bXz1imrwFz4Z5vlZV4jfRZWwsRma6Sk95IOuTMQFFVU=";
-          };
-          lib = pkgs.fenix.targets.thumbv7em-none-eabihf.toolchainOf {
-            channel = "nightly";
-            date = "2025-12-22";
-            sha256 = "sha256-bXz1imrwFz4Z5vlZV4jfRZWwsRma6Sk95IOuTMQFFVU=";
-          };
-          rust = pkgs.fenix.combine [
-            toolchain.rustc
-            toolchain.rust-src
-            toolchain.cargo
-            toolchain.rustfmt
-            toolchain.clippy
-            lib.rust-std
-          ];
-        in
-        pkgs.mkShell {
+        devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            rust
-
-            # for flashing
-            probe-rs-tools
+            rust-toolchain
+            probe-rs-tools  # flashing tools
 
             # for external deps
             pkg-config
           ];
 
-					# set default defmt log level
-					DEFMT_LOG = "info";
+          # Environment variables for rust-analyzer and logging
+          RUST_SRC_PATH = "${rust-toolchain}/lib/rustlib/src/rust/library";
+          DEFMT_LOG = "info";
         };
       }
     );
