@@ -9,7 +9,7 @@ use embassy_stm32::{
     Config, bind_interrupts, can::{
         self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf,
         frame::FdFrame,
-    }, dts::{self, Dts}, exti::ExtiInput, gpio::{Level, Output, Pull, Speed}, i2c, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9}, rcc, spi::{self, Spi}, time::Hertz, wdg::IndependentWatchdog
+    }, dts::{self, Dts}, exti::{self, ExtiInput}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::typelevel::{EXTI9_5, EXTI15_10}, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, wdg::IndependentWatchdog
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
@@ -20,8 +20,7 @@ use embassy_time::Timer;
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use south_common::{
-    TMValue, TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands,
-    telemetry::upper_sensor as tm, telemetry_container, types::Telecommand,
+    TMValue, TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands, telemetry::upper_sensor as tm, telemetry_container, types::Telecommand
 };
 use static_cell::StaticCell;
 
@@ -38,6 +37,9 @@ bind_interrupts!(struct Irqs {
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
     
     DTS => dts::InterruptHandler;
+
+    EXTI9_5 => exti::InterruptHandler<EXTI9_5>;
+    EXTI15_10 => exti::InterruptHandler<EXTI15_10>;
 });
 
 /// config rcc
@@ -58,8 +60,11 @@ fn get_rcc_config() -> rcc::Config {
     rcc_config
 }
 
-// general setup stuff
+// General setup stuff
 const STARTUP_DELAY: u64 = 300;
+
+const WATCHDOG_TIMEOUT_US: u32 = 300_000;
+const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
@@ -73,7 +78,7 @@ static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF
     StaticCell::new();
 
 // static paripherals
-static SPI: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async>>> = StaticCell::new();
+static SPI: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
 
 // can configuration
 const RX_BUF_SIZE: usize = 64;
@@ -87,7 +92,7 @@ static TX_BUF: StaticCell<TxFdBuf<TX_BUF_SIZE>> = StaticCell::new();
 async fn petter(mut watchdog: IndependentWatchdog<'static, IWDG1>) {
     loop {
         watchdog.pet();
-        Timer::after_millis(200).await;
+        Timer::after_micros(WATCHDOG_PETTING_INTERVAL_US.into()).await;
     }
 }
 
@@ -219,8 +224,8 @@ pub async fn tc_thread(
 ) {
     loop {
         match can_receiver.receive().await {
-            Ok(envelope) => match Telecommand::from_bytes(envelope.frame.data()) {
-                Ok(cmd) => tc_channel.send(cmd).await,
+            Ok(envelope) => match Telecommand::read(envelope.frame.data()) {
+                Ok(cmd) => tc_channel.send(cmd.1).await,
                 Err(_) => error!("error parsing tc"),
             },
             Err(e) => error!("error in frame! {}", e),
@@ -236,8 +241,8 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(config);
     info!("Launching");
 
-    // independent watchdog with timeout 300 MS
-    let mut watchdog = IndependentWatchdog::new(p.IWDG1, 300_000);
+    // unleash independent watchdog
+    let mut watchdog = IndependentWatchdog::new(p.IWDG1, WATCHDOG_TIMEOUT_US);
     watchdog.unleash();
 
     // TM channel setup
@@ -263,14 +268,14 @@ async fn main(spawner: Spawner) {
 
     // i2c/baro setup
     let mut cfg = i2c::Config::default();
-    cfg.frequency = Hertz(200_000);
+    cfg.frequency = khz(200);
     cfg.sda_pullup = true;
     cfg.scl_pullup = true;
     let baro = Baro::new(p.I2C1, p.PB8, p.PB9, Irqs, p.DMA1_CH1, p.DMA1_CH2, cfg);
 
     // spi/imu setup
     let mut spi_config = spi::Config::default();
-    spi_config.frequency = Hertz(3_000_000);
+    spi_config.frequency = mhz(3);
     spi_config.gpio_speed = Speed::High;
     spi_config.mode = spi::Mode {
         polarity: spi::Polarity::IdleLow,            // CPOL=0
@@ -282,12 +287,12 @@ async fn main(spawner: Spawner) {
     )));
 
     let cs1 = Output::new(p.PB0, Level::High, Speed::High);
-    let int1_1 = ExtiInput::new(p.PA9, p.EXTI9, Pull::Down);
-    let int1_2 = ExtiInput::new(p.PA8, p.EXTI8, Pull::Down);
+    let int1_1 = ExtiInput::new(p.PA9, p.EXTI9, Pull::Down, Irqs);
+    let int1_2 = ExtiInput::new(p.PA8, p.EXTI8, Pull::Down, Irqs);
 
     let cs2 = Output::new(p.PB1, Level::High, Speed::High);
-    let int2_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down);
-    let int2_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down);
+    let int2_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down, Irqs);
+    let int2_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down, Irqs);
 
     let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
     let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
