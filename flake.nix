@@ -43,6 +43,7 @@
         pkgs.mkShell {
           buildInputs = with pkgs; [
             rust
+            cargo-edit
 
             # for flashing
             probe-rs-tools
