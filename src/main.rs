@@ -16,7 +16,7 @@ use embassy_sync::{
     channel::{Channel, DynamicSender, Receiver, Sender},
     mutex::Mutex,
 };
-use embassy_time::Timer;
+use embassy_time::{Duration, Instant, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use south_common::{
@@ -120,13 +120,13 @@ pub async fn baro_thread(
     mut baro: Baro<'static, I2C1, PB8, PB9, Irqs, DMA1_CH1, DMA1_CH2>,
     mut led: Output<'static>,
 ) {
-    const BARO_LOOP_LEN_MS: u64 = 100;
+    const BARO_LOOP_LEN: Duration = Duration::from_millis(200);
+    let mut loop_time = Instant::now();
     loop {
         match baro.read_out().await {
             Ok(raw) => {
                 // let temp = raw.baro_temp_convert();
                 // let pressure = raw.baro_pressure_convert_pa();
-
                 let container =
                     UpperSensorTMContainer::new(&tm::baro::Pressure, &raw.pressure_data).unwrap();
                 tm_sender.send(container).await;
@@ -141,7 +141,8 @@ pub async fn baro_thread(
         }
 
         led.toggle();
-        Timer::after_millis(BARO_LOOP_LEN_MS).await;
+        loop_time += BARO_LOOP_LEN;
+        Timer::at(loop_time).await;
     }
 }
 
@@ -156,7 +157,8 @@ pub async fn imu_thread(
     gyro_def: &'static dyn TelemetryDefinition,
     temp_def: &'static dyn TelemetryDefinition,
 ) {
-    const IMU_LOOP_LEN_MS: u64 = 50;
+    const IMU_LOOP_LEN: Duration = Duration::from_millis(50);
+    let mut loop_time = Instant::now();
 
     // config
     imu.config.accel.dual_channel = true;
@@ -196,7 +198,8 @@ pub async fn imu_thread(
         }
 
         led.toggle();
-        Timer::after_millis(IMU_LOOP_LEN_MS).await;
+        loop_time += IMU_LOOP_LEN;
+        Timer::at(loop_time).await;
     }
 }
 
@@ -206,13 +209,15 @@ pub async fn dts_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
     mut dts: DtsDrv<'static>
 ) {
-    const DTS_LOOP_LEN_MS: u64 = 1000;
+    const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
+    let mut loop_time = Instant::now();
     loop {
         let temp = dts.read_tenth_deg().await;
         let container = UpperSensorTMContainer::new(&tm::InternalTemperature, &temp).unwrap();
         tm_sender.send(container).await;
 
-        Timer::after_millis(DTS_LOOP_LEN_MS).await;
+        loop_time += DTS_LOOP_LEN;
+        Timer::at(loop_time).await;
     }
 }
 

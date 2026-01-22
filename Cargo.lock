@@ -698,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.105"
+version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535d180e0ecab6268a3e718bb9fd44db66bbbc256257165fc699dadf70d16fe7"
+checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
@@ -759,7 +759,7 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 [[package]]
 name = "south-common"
 version = "2.0.0"
-source = "git+ssh://git@github.com/S2outh/south-common.git#cb654eff488586a14e9a5a61d017f3d84a2d6fad"
+source = "git+ssh://git@github.com/S2outh/south-common.git#a4fc144477d4901d33efa2cc363fd8b5dd71aff4"
 dependencies = [
  "defmt 1.0.1",
  "embassy-stm32",
