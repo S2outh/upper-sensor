@@ -1,5 +1,5 @@
 {
-  description = "Rust/Embassy H723 Flake";
+  description = "embassy flake";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -12,39 +12,53 @@
 
   outputs = { self, nixpkgs, fenix, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
-      let
+      let 
+        probe-rs-overlay = (final: prev: {
+          probe-rs-tools = prev.probe-rs-tools.overrideAttrs {
+            cargoBuildFeatures = [ "remote" ];
+          };
+        }); 
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ fenix.overlays.default ];
+          overlays = [
+            fenix.overlays.default 
+            probe-rs-overlay 
+          ];
         };
-
-        rust-target = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
-
-        rust-toolchain = pkgs.fenix.combine [
-          (pkgs.fenix.latest.withComponents [
-            "cargo"
-            "rustc"
-            "rust-src"
-            "rustfmt"
-            "clippy"
-          ])
-
-          rust-target.rust-std
-        ];
       in
       {
-        devShells.default = pkgs.mkShell {
+        devShells.default =
+        let
+          toolchain = pkgs.fenix.complete;
+          std-lib = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
+          rust-pkgs = pkgs.fenix.combine [
+            toolchain.rustc-unwrapped
+            toolchain.rust-src
+            toolchain.cargo
+            toolchain.rustfmt
+            toolchain.clippy
+            std-lib.rust-std
+          ];
+        in
+        pkgs.mkShell {
           buildInputs = with pkgs; [
-            rust-toolchain
-            probe-rs-tools  # flashing tools
+            rust-pkgs
+
+            # extra cargo tools
+            cargo-edit
+            cargo-expand
+
+            # for flashing
+            probe-rs-tools
 
             # for external deps
             pkg-config
           ];
 
-          # Environment variables for rust-analyzer and logging
-          RUST_SRC_PATH = "${rust-toolchain}/lib/rustlib/src/rust/library";
-          DEFMT_LOG = "info";
+          # set the rust src for rust_analyzer
+          RUST_SRC_PATH = "${rust-pkgs}/lib/rustlib/src/rust/library";
+					# set default defmt log level
+					DEFMT_LOG = "info";
         };
       }
     );

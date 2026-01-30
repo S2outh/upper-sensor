@@ -6,10 +6,22 @@ mod dts_drv;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{
+    Config, bind_interrupts,
+    can::{
         self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf,
         frame::FdFrame,
-    }, dts::{self, Dts}, exti::{self, ExtiInput}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::typelevel::{EXTI9_5, EXTI15_10}, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, wdg::IndependentWatchdog
+    },
+    dts::{self, Dts},
+    exti::{self, ExtiInput},
+    gpio::{Level, Output, Pull, Speed},
+    i2c,
+    interrupt::typelevel::{EXTI9_5, EXTI15_10},
+    mode::Async,
+    peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9},
+    rcc,
+    spi::{self, Spi, mode::Master},
+    time::{khz, mhz},
+    wdg::IndependentWatchdog,
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
@@ -20,7 +32,8 @@ use embassy_time::{Duration, Instant, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use south_common::{
-    TMValue, TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands, telemetry::upper_sensor as tm, telemetry_container, types::Telecommand
+    TMValue, TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands,
+    telemetry::upper_sensor as tm, telemetry_container, types::Telecommand,
 };
 use static_cell::StaticCell;
 
@@ -35,7 +48,7 @@ bind_interrupts!(struct Irqs {
 
     I2C1_EV => i2c::EventInterruptHandler<I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
-    
+
     DTS => dts::InterruptHandler;
 
     EXTI9_5 => exti::InterruptHandler<EXTI9_5>;
@@ -164,7 +177,11 @@ pub async fn imu_thread(
     imu.config.accel.dual_channel = true;
     imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
 
-    unwrap!(imu.config.accel.set_odr(lsm6dsv32::driver::AccelODR::KHz1_92));
+    unwrap!(
+        imu.config
+            .accel
+            .set_odr(lsm6dsv32::driver::AccelODR::KHz1_92)
+    );
     unwrap!(imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92));
 
     imu.commit_config().await;
@@ -177,7 +194,7 @@ pub async fn imu_thread(
 
                 let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
                 tm_sender.send(container).await;
-            },
+            }
             Err(e) => error!("could not read accel: {}", e),
         }
 
@@ -185,7 +202,7 @@ pub async fn imu_thread(
             Ok(data) => {
                 let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
                 tm_sender.send(container).await;
-            },
+            }
             Err(e) => error!("could not read gyro: {}", e),
         }
 
@@ -193,7 +210,7 @@ pub async fn imu_thread(
             Ok(data) => {
                 let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
                 tm_sender.send(container).await;
-            },
+            }
             Err(e) => error!("could not read temp: {}", e),
         }
 
@@ -207,7 +224,7 @@ pub async fn imu_thread(
 #[embassy_executor::task]
 pub async fn dts_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut dts: DtsDrv<'static>
+    mut dts: DtsDrv<'static>,
 ) {
     const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
     let mut loop_time = Instant::now();
@@ -244,7 +261,7 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     config.rcc = get_rcc_config();
     let p = embassy_stm32::init(config);
-    info!("Launching");
+    info!("Launching, version: {}", include_str!("version.txt"));
 
     // unleash independent watchdog
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, WATCHDOG_TIMEOUT_US);

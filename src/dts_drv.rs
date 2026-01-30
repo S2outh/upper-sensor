@@ -1,5 +1,8 @@
-use embassy_stm32::{dts::{self, Dts, FactoryCalibration}, peripherals::DTS, rcc};
-
+use embassy_stm32::{
+    dts::{self, Dts, FactoryCalibration},
+    peripherals::DTS,
+    rcc,
+};
 
 pub struct DtsDrv<'d> {
     dts: Dts<'d>,
@@ -9,7 +12,11 @@ pub struct DtsDrv<'d> {
 impl<'d> DtsDrv<'d> {
     pub fn new(dts: Dts<'d>, sample_time: dts::SampleTime) -> Self {
         let cal = Dts::factory_calibration();
-        Self { dts, cal, sample_time: sample_time as u8 }
+        Self {
+            dts,
+            cal,
+            sample_time: sample_time as u8,
+        }
     }
     fn convert_to_celsius(&self, raw_temp: u16) -> f32 {
         let raw_temp = raw_temp as f32;
