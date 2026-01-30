@@ -1,5 +1,6 @@
 [target.thumbv7em-none-eabihf]
-runner = "probe-rs run --chip STM32H723VG --host ws://upper-sensor-1.flatsat.space --token CHANGE_ME"
+runner = "./runner.sh"
+
 rustflags = [
   "-C", "link-arg=-Tlink.x", # linker file
   "-C", "link-arg=--nmagic", # no std memory layout
