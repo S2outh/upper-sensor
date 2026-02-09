@@ -657,6 +657,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoenix"
+version = "0.1.0"
+source = "git+ssh://git@github.com/S2outh/phoenix-driver.git#9a8aba096e97621e9317c2302b84767e49815c9c"
+dependencies = [
+ "defmt 1.0.1",
+ "embassy-stm32",
+ "embassy-sync",
+ "embassy-time",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -789,6 +800,7 @@ dependencies = [
  "hscmrnn030pa",
  "lsm6dsv32",
  "panic-probe",
+ "phoenix",
  "south-common",
  "static_cell",
 ]

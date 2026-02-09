@@ -2,22 +2,21 @@
 #![no_main]
 
 mod dts_drv;
+mod io_threads;
+mod sensor_threads;
 
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     Config, bind_interrupts,
-    can::{
-        self, BufferedFdCanReceiver, BufferedFdCanSender, CanConfigurator, RxFdBuf, TxFdBuf,
-        frame::FdFrame,
-    },
+    can::{self, CanConfigurator, RxFdBuf, TxFdBuf},
     dts::{self, Dts},
     exti::{self, ExtiInput},
     gpio::{Level, Output, Pull, Speed},
     i2c,
     interrupt::typelevel::{EXTI9_5, EXTI15_10},
     mode::Async,
-    peripherals::{DMA1_CH1, DMA1_CH2, FDCAN1, I2C1, IWDG1, PB8, PB9},
+    peripherals::{FDCAN1, I2C1, IWDG1},
     rcc,
     spi::{self, Spi, mode::Master},
     time::{khz, mhz},
@@ -25,14 +24,14 @@ use embassy_stm32::{
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
-    channel::{Channel, DynamicSender, Receiver, Sender},
+    channel::{Channel, DynamicSender},
     mutex::Mutex,
 };
 use embassy_time::{Duration, Instant, Timer};
 use hscmrnn030pa::driver::Baro;
-use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
+use lsm6dsv32::driver::Lsm6dsv32;
 use south_common::{
-    TMValue, TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands,
+    TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands,
     telemetry::upper_sensor as tm, telemetry_container, types::Telecommand,
 };
 use static_cell::StaticCell;
@@ -83,8 +82,8 @@ const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 type UpperSensorTMContainer = telemetry_container!(tm);
 
 // static concurrency sync management types
-const TM_CHANNEL_BUF_SIZE: usize = 5;
-const CMD_CHANNEL_BUF_SIZE: usize = 5;
+pub(crate) const TM_CHANNEL_BUF_SIZE: usize = 5;
+pub(crate) const CMD_CHANNEL_BUF_SIZE: usize = 5;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
@@ -109,118 +108,7 @@ async fn petter(mut watchdog: IndependentWatchdog<'static, IWDG1>) {
     }
 }
 
-// tm sending task
-#[embassy_executor::task]
-pub async fn tm_thread(
-    mut can_sender: BufferedFdCanSender,
-    tm_channel: Receiver<'static, ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>,
-) {
-    loop {
-        let container = tm_channel.receive().await;
-        match FdFrame::new_standard(container.id(), container.bytes()) {
-            Ok(frame) => {
-                can_sender.write(frame).await;
-            }
-            Err(e) => error!("error constructing can message: {}", e),
-        }
-    }
-}
-
-// baro
-#[embassy_executor::task]
-pub async fn baro_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut baro: Baro<'static, I2C1, PB8, PB9, Irqs, DMA1_CH1, DMA1_CH2>,
-    mut led: Output<'static>,
-) {
-    const BARO_LOOP_LEN: Duration = Duration::from_millis(200);
-    let mut loop_time = Instant::now();
-    loop {
-        match baro.read_out().await {
-            Ok(raw) => {
-                // let temp = raw.baro_temp_convert();
-                // let pressure = raw.baro_pressure_convert_pa();
-                let container =
-                    UpperSensorTMContainer::new(&tm::baro::Pressure, &raw.pressure_data).unwrap();
-                tm_sender.send(container).await;
-
-                let container =
-                    UpperSensorTMContainer::new(&tm::baro::Temp, &raw.temperature_data).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => {
-                error!("error reading baro: {}", e);
-            }
-        }
-
-        led.toggle();
-        loop_time += BARO_LOOP_LEN;
-        Timer::at(loop_time).await;
-    }
-}
-
-// imu polling task
-#[embassy_executor::task(pool_size = 2)]
-pub async fn imu_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
-    mut led: Output<'static>,
-    accel_low_range_def: &'static dyn TelemetryDefinition,
-    accel_full_range_def: &'static dyn TelemetryDefinition,
-    gyro_def: &'static dyn TelemetryDefinition,
-    temp_def: &'static dyn TelemetryDefinition,
-) {
-    const IMU_LOOP_LEN: Duration = Duration::from_millis(50);
-    let mut loop_time = Instant::now();
-
-    // config
-    imu.config.accel.dual_channel = true;
-    imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
-
-    unwrap!(
-        imu.config
-            .accel
-            .set_odr(lsm6dsv32::driver::AccelODR::KHz1_92)
-    );
-    unwrap!(imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92));
-
-    imu.commit_config().await;
-
-    loop {
-        match imu.read_accel_dual_raw().await {
-            Ok((low, full)) => {
-                let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
-                tm_sender.send(container).await;
-
-                let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read accel: {}", e),
-        }
-
-        match imu.read_gyro_raw().await {
-            Ok(data) => {
-                let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read gyro: {}", e),
-        }
-
-        match imu.read_temp_raw().await {
-            Ok(data) => {
-                let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read temp: {}", e),
-        }
-
-        led.toggle();
-        loop_time += IMU_LOOP_LEN;
-        Timer::at(loop_time).await;
-    }
-}
-
-// temperature
+// internal temperature
 #[embassy_executor::task]
 pub async fn dts_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
@@ -238,22 +126,6 @@ pub async fn dts_thread(
     }
 }
 
-// tc receiving task
-#[embassy_executor::task]
-pub async fn tc_thread(
-    can_receiver: BufferedFdCanReceiver,
-    tc_channel: Sender<'static, ThreadModeRawMutex, Telecommand, TM_CHANNEL_BUF_SIZE>,
-) {
-    loop {
-        match can_receiver.receive().await {
-            Ok(envelope) => match Telecommand::read(envelope.frame.data()) {
-                Ok(cmd) => tc_channel.send(cmd.1).await,
-                Err(_) => error!("error parsing tc"),
-            },
-            Err(e) => error!("error in frame! {}", e),
-        }
-    }
-}
 
 /// program entry
 #[embassy_executor::main]
@@ -261,7 +133,7 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     config.rcc = get_rcc_config();
     let p = embassy_stm32::init(config);
-    info!("Launching, version: {}", include_str!("version.txt"));
+    info!("Launching");
 
     // unleash independent watchdog
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, WATCHDOG_TIMEOUT_US);
@@ -333,11 +205,12 @@ async fn main(spawner: Spawner) {
 
     // -- Thread spawning
     spawner.must_spawn(petter(watchdog));
+    spawner.must_spawn(dts_thread(tm_channel.dyn_sender(), dts_drv));
 
     Timer::after_millis(STARTUP_DELAY).await;
 
     // driver threads
-    spawner.must_spawn(imu_thread(
+    spawner.must_spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
         imu1,
         yellow,
@@ -346,7 +219,7 @@ async fn main(spawner: Spawner) {
         &tm::imu1::Gyro,
         &tm::imu1::Temp,
     ));
-    spawner.must_spawn(imu_thread(
+    spawner.must_spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
         imu2,
         red,
@@ -355,12 +228,11 @@ async fn main(spawner: Spawner) {
         &tm::imu2::Gyro,
         &tm::imu2::Temp,
     ));
-    spawner.must_spawn(baro_thread(tm_channel.dyn_sender(), baro, blue));
-    spawner.must_spawn(dts_thread(tm_channel.dyn_sender(), dts_drv));
+    spawner.must_spawn(sensor_threads::baro_thread(tm_channel.dyn_sender(), baro, blue));
 
     // tmtc io threads
-    spawner.must_spawn(tm_thread(can_interface.writer(), tm_channel.receiver()));
-    spawner.must_spawn(tc_thread(can_interface.reader(), cmd_channel.sender()));
+    spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.receiver()));
+    spawner.must_spawn(io_threads::tc_thread(can_interface.reader(), cmd_channel.sender()));
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;
