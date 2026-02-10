@@ -8,19 +8,7 @@ mod sensor_threads;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts,
-    can::{self, CanConfigurator, RxFdBuf, TxFdBuf},
-    dts::{self, Dts},
-    exti::{self, ExtiInput},
-    gpio::{Level, Output, Pull, Speed},
-    i2c,
-    interrupt::typelevel::{EXTI9_5, EXTI15_10},
-    mode::Async,
-    peripherals::{FDCAN1, I2C1, IWDG1},
-    rcc,
-    spi::{self, Spi, mode::Master},
-    time::{khz, mhz},
-    wdg::IndependentWatchdog,
+    Config, bind_interrupts, can::{self, CanConfigurator, RxFdBuf, TxFdBuf}, dts::{self, Dts}, exti::{self, ExtiInput}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::typelevel::{EXTI4, EXTI15_10}, mode::Async, peripherals::{FDCAN1, I2C1, IWDG1, USART6}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, usart::{self, Uart}, wdg::IndependentWatchdog
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
@@ -30,6 +18,7 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
+use phoenix::driver::Phoenix;
 use south_common::{
     TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands,
     telemetry::upper_sensor as tm, telemetry_container, types::Telecommand,
@@ -50,8 +39,10 @@ bind_interrupts!(struct Irqs {
 
     DTS => dts::InterruptHandler;
 
-    EXTI9_5 => exti::InterruptHandler<EXTI9_5>;
+    EXTI4 => exti::InterruptHandler<EXTI4>;
     EXTI15_10 => exti::InterruptHandler<EXTI15_10>;
+
+    USART6 => usart::InterruptHandler<USART6>;
 });
 
 /// config rcc
@@ -78,12 +69,14 @@ const STARTUP_DELAY: u64 = 300;
 const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
+pub const PHOENIX_RX_BUF_SIZE: usize = 256;
+
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
 
 // static concurrency sync management types
-pub(crate) const TM_CHANNEL_BUF_SIZE: usize = 5;
-pub(crate) const CMD_CHANNEL_BUF_SIZE: usize = 5;
+pub const TM_CHANNEL_BUF_SIZE: usize = 5;
+pub const CMD_CHANNEL_BUF_SIZE: usize = 5;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
@@ -93,11 +86,11 @@ static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF
 static SPI: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
 
 // can configuration
-const RX_BUF_SIZE: usize = 64;
-const TX_BUF_SIZE: usize = 64;
+const C_RX_BUF_SIZE: usize = 64;
+const C_TX_BUF_SIZE: usize = 64;
 
-static RX_BUF: StaticCell<RxFdBuf<RX_BUF_SIZE>> = StaticCell::new();
-static TX_BUF: StaticCell<TxFdBuf<TX_BUF_SIZE>> = StaticCell::new();
+static C_RX_BUF: StaticCell<RxFdBuf<C_RX_BUF_SIZE>> = StaticCell::new();
+static C_TX_BUF: StaticCell<TxFdBuf<C_TX_BUF_SIZE>> = StaticCell::new();
 
 /// Watchdog petting task
 #[embassy_executor::task]
@@ -156,8 +149,8 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     let can_interface = can_configurator.activate(
-        TX_BUF.init(TxFdBuf::<TX_BUF_SIZE>::new()),
-        RX_BUF.init(RxFdBuf::<RX_BUF_SIZE>::new()),
+        C_TX_BUF.init(TxFdBuf::<C_TX_BUF_SIZE>::new()),
+        C_RX_BUF.init(RxFdBuf::<C_RX_BUF_SIZE>::new()),
     );
 
     // i2c/baro setup
@@ -181,15 +174,21 @@ async fn main(spawner: Spawner) {
     )));
 
     let cs1 = Output::new(p.PB0, Level::High, Speed::High);
-    let int1_1 = ExtiInput::new(p.PA9, p.EXTI9, Pull::Down, Irqs);
-    let int1_2 = ExtiInput::new(p.PA8, p.EXTI8, Pull::Down, Irqs);
+    let int1_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down, Irqs);
+    let int1_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down, Irqs);
 
     let cs2 = Output::new(p.PB1, Level::High, Speed::High);
-    let int2_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down, Irqs);
-    let int2_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down, Irqs);
+    let int2_1 = ExtiInput::new(p.PA15, p.EXTI15, Pull::Down, Irqs);
+    let int2_2 = ExtiInput::new(p.PE4, p.EXTI4, Pull::Down, Irqs);
 
     let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
     let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
+
+    // uart/phoenix setup
+    let mut config = usart::Config::default();
+    config.baudrate = 57600;
+    let uart = Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config).unwrap();
+    let phoenix: Phoenix<_> = Phoenix::new(uart);
 
     // internal temperature sensor
     let mut dts_config = dts::Config::default();
@@ -229,6 +228,7 @@ async fn main(spawner: Spawner) {
         &tm::imu2::Temp,
     ));
     spawner.must_spawn(sensor_threads::baro_thread(tm_channel.dyn_sender(), baro, blue));
+    spawner.must_spawn(sensor_threads::phoenix_thread(tm_channel.dyn_sender(), phoenix));
 
     // tmtc io threads
     spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.receiver()));

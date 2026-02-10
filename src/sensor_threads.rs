@@ -2,15 +2,15 @@
 use embassy_stm32::{gpio::Output, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}};
 use embassy_sync::channel::DynamicSender;
 use embassy_time::{Duration, Instant, Timer};
-use defmt::{error, unwrap};
+use defmt::{error, unwrap, info, warn};
 
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use hscmrnn030pa::driver::Baro;
 
-use phoenix::driver::Phoenix;
+use phoenix::driver::{Message, Phoenix};
 use south_common::{TelemetryDefinition, telemetry::upper_sensor as tm};
 
-use crate::{Irqs, UpperSensorTMContainer};
+use crate::{Irqs, UpperSensorTMContainer, PHOENIX_RX_BUF_SIZE};
 
 // baro polling task
 #[embassy_executor::task]
@@ -103,5 +103,36 @@ pub async fn imu_thread(
         led.toggle();
         loop_time += IMU_LOOP_LEN;
         Timer::at(loop_time).await;
+    }
+}
+
+// phoenix polling task
+#[embassy_executor::task]
+pub async fn phoenix_thread(
+    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    mut phoenix: Phoenix<'static, PHOENIX_RX_BUF_SIZE>,
+) {
+    loop {
+        match phoenix.next_message().await {
+            Ok(msg) => {
+                match msg {
+                    Message::F00(f00) => {
+                        info!("Received F00");
+                        let container =
+                            UpperSensorTMContainer::new(&tm::gps::Pos, &[f00.lat, f00.lon, f00.height]).unwrap();
+                        tm_sender.send(container).await;
+                    }
+                    Message::F44(_f44) => {
+                        info!("Received F44");
+                    }
+                    Message::Unknown(id) => {
+                        warn!("Received unknown message with ID: {}", id);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Error reading message: {:?}", e);
+            }
+        }
     }
 }
