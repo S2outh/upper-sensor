@@ -121,6 +121,14 @@ pub async fn phoenix_thread(
                         let container =
                             UpperSensorTMContainer::new(&tm::gps::Pos, &[f00.lat, f00.lon, f00.height]).unwrap();
                         tm_sender.send(container).await;
+
+                        let status = (f00.nav_status & 0b11) << 0
+                                   | (f00.system_status & 0b11) << 2
+                                   | f00.sv.min(0b1111) << 4;
+
+                        let container =
+                            UpperSensorTMContainer::new(&tm::gps::Status, &status).unwrap();
+                        tm_sender.send(container).await;
                     }
                     Message::F44(_f44) => {
                         info!("Received F44");
