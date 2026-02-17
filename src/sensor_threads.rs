@@ -8,7 +8,10 @@ use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
 use hscmrnn030pa::driver::Baro;
 
 use phoenix::driver::{Message, Phoenix};
-use south_common::{TelemetryDefinition, telemetry::upper_sensor as tm};
+use south_common::{
+    tmtc_system::TelemetryDefinition,
+    definitions::telemetry::upper_sensor as tm
+};
 
 use crate::{Irqs, UpperSensorTMContainer, PHOENIX_RX_BUF_SIZE};
 
@@ -121,6 +124,7 @@ pub async fn phoenix_thread(
                         let container =
                             UpperSensorTMContainer::new(&tm::gps::Pos, &[f00.lat, f00.lon, f00.height]).unwrap();
                         tm_sender.send(container).await;
+                        info!("nav: {}, system: {}, sv: {}", f00.nav_status, f00.system_status, f00.sv);
 
                         let status = (f00.nav_status & 0b11) << 0
                                    | (f00.system_status & 0b11) << 2

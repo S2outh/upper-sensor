@@ -8,7 +8,7 @@ use embassy_stm32::{
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Receiver, Sender}};
 use defmt::error;
 
-use south_common::{types::Telecommand, TMValue};
+use south_common::{types::Telecommand, tmtc_system::TMValue};
 
 use crate::{UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE, CMD_CHANNEL_BUF_SIZE};
 

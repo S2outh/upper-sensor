@@ -20,8 +20,11 @@ use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
 use phoenix::driver::Phoenix;
 use south_common::{
-    TelemetryContainer, TelemetryDefinition, can_config::CanPeriphConfig, telecommands,
-    telemetry::upper_sensor as tm, telemetry_container, types::Telecommand,
+    tmtc_system::{TelemetryContainer, telemetry_container, TelemetryDefinition},
+    can_config::CanPeriphConfig,
+    definitions::telecommands,
+    definitions::telemetry::upper_sensor as tm,
+    types::Telecommand,
 };
 use static_cell::StaticCell;
 
