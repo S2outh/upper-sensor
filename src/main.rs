@@ -15,7 +15,7 @@ use embassy_sync::{
     channel::{Channel, DynamicSender},
     mutex::Mutex,
 };
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
 use phoenix::driver::Phoenix;
@@ -51,17 +51,17 @@ bind_interrupts!(struct Irqs {
 /// config rcc
 fn get_rcc_config() -> rcc::Config {
     let mut rcc_config = rcc::Config::default();
-    rcc_config.hsi = Some(rcc::HSIPrescaler::DIV1);
-    rcc_config.sys = rcc::Sysclk::HSI;
+    rcc_config.hsi = Some(rcc::HSIPrescaler::DIV1); // 64 MHz
+    rcc_config.sys = rcc::Sysclk::HSI;              // cpu runns with 64 MHz
     rcc_config.pll1 = Some(rcc::Pll {
         source: rcc::PllSource::HSI,
-        prediv: rcc::PllPreDiv::DIV8,
-        mul: rcc::PllMul::MUL40,
-        divp: None,
-        divq: Some(rcc::PllDiv::DIV10),
-        divr: Some(rcc::PllDiv::DIV5),
+        prediv: rcc::PllPreDiv::DIV8,               // 8 MHz
+        mul: rcc::PllMul::MUL40,                    // 320 MHz
+        divp: None,                                 // 320 MHz
+        divq: Some(rcc::PllDiv::DIV10),             // 32 MHz
+        divr: Some(rcc::PllDiv::DIV5),              // 64 MHz
     });
-    rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q;
+    rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q; // can runns with 32 MHz
     rcc_config.voltage_scale = rcc::VoltageScale::Scale1;
     rcc_config
 }
@@ -111,14 +111,13 @@ pub async fn dts_thread(
     mut dts: DtsDrv<'static>,
 ) {
     const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
-    let mut loop_time = Instant::now();
+    let mut ticker = Ticker::every(DTS_LOOP_LEN);
     loop {
         let temp = dts.read_tenth_deg().await;
         let container = UpperSensorTMContainer::new(&tm::InternalTemperature, &temp).unwrap();
         tm_sender.send(container).await;
 
-        loop_time += DTS_LOOP_LEN;
-        Timer::at(loop_time).await;
+        ticker.next().await;
     }
 }
 
@@ -129,7 +128,15 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     config.rcc = get_rcc_config();
     let p = embassy_stm32::init(config);
-    info!("Launching");
+
+    const FW_VERSION: &str = env!("FW_VERSION");
+    const FW_HASH: &str = env!("FW_HASH");
+
+    info!(
+        "Launching: FW version={} hash={}",
+        FW_VERSION,
+        FW_HASH
+    );
 
     // unleash independent watchdog
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, WATCHDOG_TIMEOUT_US);

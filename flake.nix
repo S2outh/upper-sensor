@@ -1,3 +1,4 @@
+
 {
   description = "embassy flake";
 
@@ -8,11 +9,16 @@
       url = "github:nix-community/fenix/monthly";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    naersk = {
+      url = "github:nix-community/naersk";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.fenix.follows = "fenix";
+    };
   };
 
-  outputs = { self, nixpkgs, fenix, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, fenix, naersk }:
     flake-utils.lib.eachDefaultSystem (system:
-      let 
+      let
         probe-rs-overlay = (final: prev: {
           probe-rs-tools = prev.probe-rs-tools.overrideAttrs {
             cargoBuildFeatures = [ "remote" ];
@@ -25,24 +31,24 @@
             probe-rs-overlay 
           ];
         };
+        profile = pkgs.fenix.complete;
+        rust-analyzer = pkgs.fenix.rust-analyzer;
+        std-lib = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
+        rust-toolchain = pkgs.fenix.combine [
+          profile.rustc-unwrapped
+          profile.rust-src
+          profile.cargo
+          profile.rustfmt
+          profile.clippy
+          std-lib.rust-std
+        ];
       in
       {
         devShells.default =
-        let
-          toolchain = pkgs.fenix.complete;
-          std-lib = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
-          rust-pkgs = pkgs.fenix.combine [
-            toolchain.rustc-unwrapped
-            toolchain.rust-src
-            toolchain.cargo
-            toolchain.rustfmt
-            toolchain.clippy
-            std-lib.rust-std
-          ];
-        in
         pkgs.mkShell {
           buildInputs = with pkgs; [
-            rust-pkgs
+            rust-toolchain
+            rust-analyzer
 
             # extra cargo tools
             cargo-edit
@@ -50,16 +56,26 @@
 
             # for flashing
             probe-rs-tools
-
-            # for external deps
-            pkg-config
           ];
 
           # set the rust src for rust_analyzer
-          RUST_SRC_PATH = "${rust-pkgs}/lib/rustlib/src/rust/library";
-					# set default defmt log level
-					DEFMT_LOG = "info";
+          RUST_SRC_PATH = "${rust-toolchain}/lib/rustlib/src/rust/library";
+          # set default defmt log level
+          DEFMT_LOG = "info";
+        };
+
+        packages.default = 
+        (naersk.lib.${system}.override {
+          cargo = rust-toolchain;
+          rustc = rust-toolchain;
+        }).buildPackage {
+          src = ./.;
+          FW_VERSION = builtins.getEnv "FW_VERSION";
+          FW_HASH    = builtins.getEnv "FW_HASH";
+
+          DEFMT_LOG = "info";
         };
       }
     );
 }
+

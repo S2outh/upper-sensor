@@ -1,7 +1,7 @@
 
 use embassy_stm32::{gpio::Output, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}};
 use embassy_sync::channel::DynamicSender;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Ticker};
 use defmt::{error, unwrap, info, warn};
 
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
@@ -23,7 +23,7 @@ pub async fn baro_thread(
     mut led: Output<'static>,
 ) {
     const BARO_LOOP_LEN: Duration = Duration::from_millis(200);
-    let mut loop_time = Instant::now();
+    let mut ticker = Ticker::every(BARO_LOOP_LEN);
     loop {
         match baro.read_out().await {
             Ok(raw) => {
@@ -43,8 +43,7 @@ pub async fn baro_thread(
         }
 
         led.toggle();
-        loop_time += BARO_LOOP_LEN;
-        Timer::at(loop_time).await;
+        ticker.next().await;
     }
 }
 
@@ -60,7 +59,7 @@ pub async fn imu_thread(
     temp_def: &'static dyn TelemetryDefinition,
 ) {
     const IMU_LOOP_LEN: Duration = Duration::from_millis(50);
-    let mut loop_time = Instant::now();
+    let mut ticker = Ticker::every(IMU_LOOP_LEN);
 
     // config
     imu.config.accel.dual_channel = true;
@@ -104,8 +103,7 @@ pub async fn imu_thread(
         }
 
         led.toggle();
-        loop_time += IMU_LOOP_LEN;
-        Timer::at(loop_time).await;
+        ticker.next().await;
     }
 }
 
