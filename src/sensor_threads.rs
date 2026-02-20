@@ -4,7 +4,7 @@ use embassy_sync::channel::DynamicSender;
 use embassy_time::{Duration, Ticker};
 use defmt::{error, unwrap, info, warn};
 
-use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
+use lsm6dsv32::driver::{FifoDisabled, HighAccuracyODR, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 use hscmrnn030pa::driver::Baro;
 
 use phoenix::driver::{Message, Phoenix};
@@ -56,14 +56,15 @@ pub async fn imu_thread(
     accel_low_range_def: &'static dyn TelemetryDefinition,
     accel_full_range_def: &'static dyn TelemetryDefinition,
     gyro_def: &'static dyn TelemetryDefinition,
-    temp_def: &'static dyn TelemetryDefinition,
+    _temp_def: &'static dyn TelemetryDefinition,
 ) {
-    const IMU_LOOP_LEN: Duration = Duration::from_millis(50);
-    let mut ticker = Ticker::every(IMU_LOOP_LEN);
-
+    //const READ_TEMPERATURE_INTERVAL: Duration = Duration::from_secs(1);
     // config
     imu.config.accel.dual_channel = true;
     imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
+
+    // active low interrupt
+    imu.config.general.interrupt_lvl = true;
 
     unwrap!(
         imu.config
@@ -72,38 +73,52 @@ pub async fn imu_thread(
     );
     unwrap!(imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92));
 
+    // high accuracy mode
+    imu.config.use_high_accuracy_mode(HighAccuracyODR::Standard);
+
     imu.commit_config().await;
 
+    let mut imu = imu.enable_interrupt1();
+
     loop {
-        match imu.read_accel_dual_raw().await {
-            Ok((low, full)) => {
-                let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
-                tm_sender.send(container).await;
+        match imu.wait_for_data_ready_interrupt1(
+            true, // Accel
+            true, // Gyro
+            false, // Temp
+            LogicOp::AND,
+        ).await {
+            Ok(_) => {
+                match imu.read_accel_dual_raw().await {
+                    Ok((low, full)) => {
+                        let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
+                        tm_sender.send(container).await;
 
-                let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read accel: {}", e),
-        }
+                        let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
+                        tm_sender.send(container).await;
+                    }
+                    Err(e) => error!("could not read accel: {}", e),
+                }
 
-        match imu.read_gyro_raw().await {
-            Ok(data) => {
-                let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read gyro: {}", e),
-        }
+                match imu.read_gyro_raw().await {
+                    Ok(data) => {
+                        let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
+                        tm_sender.send(container).await;
+                    }
+                    Err(e) => error!("could not read gyro: {}", e),
+                }
 
-        match imu.read_temp_raw().await {
-            Ok(data) => {
-                let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
-                tm_sender.send(container).await;
+                // match imu.read_temp_raw().await {
+                //     Ok(data) => {
+                //         let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
+                //         tm_sender.send(container).await;
+                //     }
+                //     Err(e) => error!("could not read temp: {}", e),
+                // }
             }
             Err(e) => error!("could not read temp: {}", e),
         }
 
         led.toggle();
-        ticker.next().await;
     }
 }
 
