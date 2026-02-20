@@ -59,6 +59,9 @@ pub async fn imu_thread(
     _temp_def: &'static dyn TelemetryDefinition,
 ) {
     //const READ_TEMPERATURE_INTERVAL: Duration = Duration::from_secs(1);
+    // high accuracy mode
+    imu.config.use_high_accuracy_mode(HighAccuracyODR::Standard);
+
     // config
     imu.config.accel.dual_channel = true;
     imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
@@ -73,12 +76,15 @@ pub async fn imu_thread(
     );
     unwrap!(imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92));
 
-    // high accuracy mode
-    imu.config.use_high_accuracy_mode(HighAccuracyODR::Standard);
-
+    
     imu.commit_config().await;
+    
 
     let mut imu = imu.enable_interrupt1();
+    imu.config.int1.data_ready_accel = true;
+    imu.config.int1.data_ready_gyro = true;
+
+    imu.commit_config().await;
 
     loop {
         match imu.wait_for_data_ready_interrupt1(
