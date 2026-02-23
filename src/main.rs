@@ -72,14 +72,14 @@ const STARTUP_DELAY: u64 = 300;
 const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
-pub const PHOENIX_RX_BUF_SIZE: usize = 256;
+const PHOENIX_RX_BUF_SIZE: usize = 256;
 
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
 
 // static concurrency sync management types
-pub const TM_CHANNEL_BUF_SIZE: usize = 5;
-pub const CMD_CHANNEL_BUF_SIZE: usize = 5;
+const TM_CHANNEL_BUF_SIZE: usize = 5;
+const CMD_CHANNEL_BUF_SIZE: usize = 5;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
@@ -184,12 +184,12 @@ async fn main(spawner: Spawner) {
     )));
 
     let cs1 = Output::new(p.PB0, Level::High, Speed::High);
-    let int1_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down, Irqs);
-    let int1_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down, Irqs);
+    let int1_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Up, Irqs);
+    let int1_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Up, Irqs);
 
     let cs2 = Output::new(p.PB1, Level::High, Speed::High);
-    let int2_1 = ExtiInput::new(p.PA15, p.EXTI15, Pull::Down, Irqs);
-    let int2_2 = ExtiInput::new(p.PE4, p.EXTI4, Pull::Down, Irqs);
+    let int2_1 = ExtiInput::new(p.PA15, p.EXTI15, Pull::Up, Irqs);
+    let int2_2 = ExtiInput::new(p.PE4, p.EXTI4, Pull::Up, Irqs);
 
     let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
     let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
@@ -241,8 +241,8 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(sensor_threads::phoenix_thread(tm_channel.dyn_sender(), phoenix));
 
     // tmtc io threads
-    spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.receiver()));
-    spawner.must_spawn(io_threads::tc_thread(can_interface.reader(), cmd_channel.sender()));
+    spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.dyn_receiver()));
+    spawner.must_spawn(io_threads::tc_thread(can_interface.reader(), cmd_channel.dyn_sender()));
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;
