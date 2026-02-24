@@ -163,7 +163,7 @@ pub async fn phoenix_thread(
                         ];
 
                         let state = msg.navigation_status
-                            | (msg.tracked_satellites << 4);
+                            | (msg.tracked_satellites << 2);
 
                         let container = UpperSensorTMContainer::new(&tm::gps::ECEF, &ecef).unwrap();
                         tm_sender.send(container).await;
