@@ -1,19 +1,18 @@
-
-use embassy_stm32::{gpio::Output, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}};
+use embassy_stm32::{gpio::Output, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}, usart::{RingBufferedUartRx, UartTx}};
 use embassy_sync::channel::DynamicSender;
 use embassy_time::{Duration, Ticker};
-use defmt::{error, unwrap, info, warn};
+use defmt::{Debug2Format, error, info, unwrap, warn};
 
 use lsm6dsv32::driver::{FifoDisabled, HighAccuracyODR, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 use hscmrnn030pa::driver::Baro;
 
-use phoenix::driver::{Message, Phoenix};
+use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use south_common::{
     tmtc_system::TelemetryDefinition,
     definitions::telemetry::upper_sensor as tm
 };
 
-use crate::{Irqs, UpperSensorTMContainer, PHOENIX_RX_BUF_SIZE};
+use crate::{Irqs, UpperSensorTMContainer, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
 
 // baro polling task
 #[embassy_executor::task]
@@ -132,37 +131,54 @@ pub async fn imu_thread(
 #[embassy_executor::task]
 pub async fn phoenix_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut phoenix: Phoenix<'static, PHOENIX_RX_BUF_SIZE>,
+    mut phoenix: PhoenixService<RingBufferedUartRx<'static>, UartTx<'static, Async>, EmbassyTimer, LiftoffPin<'static>, EmbassyClock, 256>,
 ) {
     loop {
-        match phoenix.next_message().await {
-            Ok(msg) => {
+        match phoenix.next_event().await {
+            Ok(PhoenixEvent::StateChanged(state)) => {
+                info!("phoenix state={:?}", Debug2Format(&state));
+            }
+            Ok(PhoenixEvent::Fix3D { tt3d_ms }) => {
+                info!("phoenix 3d lock tt3d_ms={=u64}", tt3d_ms);
+            }
+            Ok(PhoenixEvent::Warning(w)) => {
+                warn!("phoenix warning={:?}", Debug2Format(&w));
+            }
+            Ok(PhoenixEvent::CommandResponse(resp)) => {
+                info!("phoenix cmd resp: {}", resp.text.as_str());
+            }
+            Ok(PhoenixEvent::Message(msg)) => {
                 match msg {
-                    Message::F00(f00) => {
-                        info!("Received F00");
-                        let container =
-                            UpperSensorTMContainer::new(&tm::gps::Pos, &[f00.lat, f00.lon, f00.height]).unwrap();
-                        tm_sender.send(container).await;
-                        info!("nav: {}, system: {}, sv: {}", f00.nav_status, f00.system_status, f00.sv);
+                    phoenix::gps::GpsMessage::F40(msg) => {
+                        let ecef = [
+                            msg.x_wgs84_cm as i32,
+                            msg.y_wgs84_cm as i32,
+                            msg.z_wgs84_cm as i32,
+                        ];
 
-                        let status = (f00.nav_status & 0b11) << 0
-                                   | (f00.system_status & 0b11) << 2
-                                   | f00.sv.min(0b1111) << 4;
+                        let vel = [
+                            msg.vx_wgs84_1e5_mps as i32,
+                            msg.vy_wgs84_1e5_mps as i32,
+                            msg.vz_wgs84_1e5_mps as i32,
+                        ];
 
-                        let container =
-                            UpperSensorTMContainer::new(&tm::gps::Status, &status).unwrap();
+                        let state = msg.navigation_status
+                            | (msg.tracked_satellites << 4);
+
+                        let container = UpperSensorTMContainer::new(&tm::gps::ECEF, &ecef).unwrap();
+                        tm_sender.send(container).await;
+
+                        let container = UpperSensorTMContainer::new(&tm::gps::Vel, &vel).unwrap();
+                        tm_sender.send(container).await;
+
+                        let container = UpperSensorTMContainer::new(&tm::gps::Status, &state).unwrap();
                         tm_sender.send(container).await;
                     }
-                    Message::F44(_f44) => {
-                        info!("Received F44");
-                    }
-                    Message::Unknown(id) => {
-                        warn!("Received unknown message with ID: {}", id);
-                    }
+                    _ => ()
                 }
             }
             Err(e) => {
-                error!("Error reading message: {:?}", e);
+                warn!("phoenix event error: {:?}", Debug2Format(&e));
             }
         }
     }

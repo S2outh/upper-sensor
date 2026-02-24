@@ -4,6 +4,7 @@
 mod dts_drv;
 mod io_threads;
 mod sensor_threads;
+mod embassy_adapter;
 
 use defmt::*;
 use embassy_executor::Spawner;
@@ -18,7 +19,9 @@ use embassy_sync::{
 use embassy_time::{Duration, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
-use phoenix::driver::Phoenix;
+use phoenix::{gps::{DataRateInterval, GpsDriver}, phoenix::{
+    OutputConfig, PhoenixService, StartupConfig, StartupMode,
+}};
 use south_common::{
     tmtc_system::{TelemetryContainer, telemetry_container, TelemetryDefinition},
     can_config::CanPeriphConfig,
@@ -28,7 +31,7 @@ use south_common::{
 };
 use static_cell::StaticCell;
 
-use crate::dts_drv::DtsDrv;
+use crate::{dts_drv::DtsDrv, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -72,8 +75,6 @@ const STARTUP_DELAY: u64 = 300;
 const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
-const PHOENIX_RX_BUF_SIZE: usize = 256;
-
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
 
@@ -94,6 +95,10 @@ const C_TX_BUF_SIZE: usize = 64;
 
 static C_RX_BUF: StaticCell<RxFdBuf<C_RX_BUF_SIZE>> = StaticCell::new();
 static C_TX_BUF: StaticCell<TxFdBuf<C_TX_BUF_SIZE>> = StaticCell::new();
+
+// Static uart buffer
+const S_RX_BUF_SIZE: usize = 256;
+static S_RX_BUF: StaticCell<[u8; S_RX_BUF_SIZE]> = StaticCell::new();
 
 /// Watchdog petting task
 #[embassy_executor::task]
@@ -197,8 +202,26 @@ async fn main(spawner: Spawner) {
     // uart/phoenix setup
     let mut config = usart::Config::default();
     config.baudrate = 57600;
-    let uart = Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config).unwrap();
-    let phoenix: Phoenix<_> = Phoenix::new(uart);
+    let (uart_tx, uart_rx) = Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config).unwrap().split();
+
+    let startup = StartupConfig {
+        mode: StartupMode::Regular,
+        initial_position: None,
+        initial_epoch: None,
+        outputs: OutputConfig {
+            f00: Some(DataRateInterval::Disabled),
+            f40: Some(DataRateInterval::from_hz(1, 1).unwrap()),
+            f48: Some(DataRateInterval::Disabled),
+        },
+    };
+    
+    let driver = GpsDriver::<_, _, _, 256>::new(
+        uart_rx.into_ring_buffered(S_RX_BUF.init([0; _])),
+        uart_tx,
+        EmbassyTimer
+    );
+    let liftoff = LiftoffPin(Output::new(p.PA0, Level::Low, Speed::Low));
+    let phoenix = PhoenixService::new(driver, EmbassyClock, liftoff, startup);
 
     // internal temperature sensor
     let mut dts_config = dts::Config::default();
