@@ -616,7 +616,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "lsm6dsv32"
 version = "0.1.0"
-source = "git+ssh://git@github.com/S2outh/imu-driver.git#8a729db9dc33d024fff25da7d325f7f9fcc0cc8f"
+source = "git+ssh://git@github.com/S2outh/imu-driver.git#5d21ae2ba5160fcc34d3453673dc33a23d7a8e78"
 dependencies = [
  "defmt 1.0.1",
  "embassy-stm32",
@@ -661,7 +661,7 @@ dependencies = [
 [[package]]
 name = "phoenix"
 version = "0.1.0"
-source = "git+ssh://git@github.com/S2outh/phoenix-vibing.git?branch=dev#52a4d4949a30e45231d33312952ad4c5ceb086df"
+source = "git+ssh://git@github.com/S2outh/phoenix-vibing.git?branch=dev#98dc4e56a6ab8a43015beef8d08625c6d8f210de"
 dependencies = [
  "defmt 1.0.1",
  "embedded-io-async 0.7.0",
@@ -785,7 +785,7 @@ dependencies = [
 [[package]]
 name = "south-common"
 version = "3.0.0"
-source = "git+ssh://git@github.com/S2outh/south-common.git#6934f5efb6288faf8623c74e9f0c6867df79188e"
+source = "git+ssh://git@github.com/S2outh/south-common.git#815cb481bbc90b8b10d4fb829fc8a41f53cf1cbf"
 dependencies = [
  "bitflags 2.11.0",
  "defmt 1.0.1",
