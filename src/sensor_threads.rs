@@ -8,8 +8,7 @@ use hscmrnn030pa::driver::Baro;
 
 use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use south_common::{
-    tmtc_system::TelemetryDefinition,
-    definitions::telemetry::upper_sensor as tm
+    definitions::telemetry::upper_sensor as tm, tmtc_system::TelemetryDefinition, types::upper_sensor::BaroRaw
 };
 
 use crate::{Irqs, UpperSensorTMContainer, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
@@ -28,12 +27,14 @@ pub async fn baro_thread(
             Ok(raw) => {
                 // let temp = raw.baro_temp_convert();
                 // let pressure = raw.baro_pressure_convert_pa();
-                let container =
-                    UpperSensorTMContainer::new(&tm::baro::Pressure, &raw.pressure_data).unwrap();
-                tm_sender.send(container).await;
+                let raw = BaroRaw {
+                    status: raw.status,
+                    pressure_data: raw.pressure_data,
+                    temperature_data: raw.temperature_data,
+                };
 
                 let container =
-                    UpperSensorTMContainer::new(&tm::baro::Temp, &raw.temperature_data).unwrap();
+                    UpperSensorTMContainer::new(&tm::Baro, &raw).unwrap();
                 tm_sender.send(container).await;
             }
             Err(e) => {
@@ -55,7 +56,6 @@ pub async fn imu_thread(
     accel_low_range_def: &'static dyn TelemetryDefinition,
     accel_full_range_def: &'static dyn TelemetryDefinition,
     gyro_def: &'static dyn TelemetryDefinition,
-    _temp_def: &'static dyn TelemetryDefinition,
 ) {
     //const READ_TEMPERATURE_INTERVAL: Duration = Duration::from_secs(1);
     // high accuracy mode

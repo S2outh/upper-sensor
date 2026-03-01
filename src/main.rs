@@ -249,7 +249,6 @@ async fn main(spawner: Spawner) {
         &tm::imu1::AccelLowRange,
         &tm::imu1::AccelFullRange,
         &tm::imu1::Gyro,
-        &tm::imu1::Temp,
     ));
     spawner.must_spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
@@ -258,7 +257,6 @@ async fn main(spawner: Spawner) {
         &tm::imu2::AccelLowRange,
         &tm::imu2::AccelFullRange,
         &tm::imu2::Gyro,
-        &tm::imu2::Temp,
     ));
     spawner.must_spawn(sensor_threads::baro_thread(tm_channel.dyn_sender(), baro, blue));
     spawner.must_spawn(sensor_threads::phoenix_thread(tm_channel.dyn_sender(), phoenix));
