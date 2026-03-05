@@ -24,8 +24,8 @@ use phoenix::{gps::{DataRateInterval, GpsDriver}, phoenix::{
 }};
 use south_common::{
     tmtc_system::{TelemetryContainer, telemetry_container, TelemetryDefinition},
-    can_config::CanPeriphConfig,
-    definitions::telecommands,
+    configs::can_config::CanPeriphConfig,
+    definitions::internal_msgs,
     definitions::telemetry::upper_sensor as tm,
     types::Telecommand,
 };
@@ -160,7 +160,7 @@ async fn main(spawner: Spawner) {
         CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
 
     can_configurator
-        .add_receive_topic(telecommands::Telecommand.id())
+        .add_receive_topic(internal_msgs::Telecommand.id())
         .unwrap();
 
     let can_interface = can_configurator.activate(
@@ -246,16 +246,14 @@ async fn main(spawner: Spawner) {
         tm_channel.dyn_sender(),
         imu1,
         yellow,
-        &tm::imu1::AccelLowRange,
-        &tm::imu1::AccelFullRange,
+        &tm::imu1::Accel,
         &tm::imu1::Gyro,
     ));
     spawner.must_spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
         imu2,
         red,
-        &tm::imu2::AccelLowRange,
-        &tm::imu2::AccelFullRange,
+        &tm::imu2::Accel,
         &tm::imu2::Gyro,
     ));
     spawner.must_spawn(sensor_threads::baro_thread(tm_channel.dyn_sender(), baro, blue));
