@@ -1,19 +1,17 @@
-
-use embassy_stm32::{gpio::Output, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}};
+use embassy_stm32::{gpio::Output, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}, usart::{RingBufferedUartRx, UartTx}};
 use embassy_sync::channel::DynamicSender;
 use embassy_time::{Duration, Ticker};
-use defmt::{error, unwrap, info, warn};
+use defmt::{Debug2Format, error, info, warn};
 
-use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, Lsm6dsv32};
+use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 use hscmrnn030pa::driver::Baro;
 
-use phoenix::driver::{Message, Phoenix};
+use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use south_common::{
-    tmtc_system::TelemetryDefinition,
-    definitions::telemetry::upper_sensor as tm
+    definitions::telemetry::upper_sensor as tm, tmtc_system::TelemetryDefinition, types::{Vector3i32, upper_sensor::AccelRaw},
 };
 
-use crate::{Irqs, UpperSensorTMContainer, PHOENIX_RX_BUF_SIZE};
+use crate::{Irqs, UpperSensorTMContainer, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
 
 // baro polling task
 #[embassy_executor::task]
@@ -30,11 +28,7 @@ pub async fn baro_thread(
                 // let temp = raw.baro_temp_convert();
                 // let pressure = raw.baro_pressure_convert_pa();
                 let container =
-                    UpperSensorTMContainer::new(&tm::baro::Pressure, &raw.pressure_data).unwrap();
-                tm_sender.send(container).await;
-
-                let container =
-                    UpperSensorTMContainer::new(&tm::baro::Temp, &raw.temperature_data).unwrap();
+                    UpperSensorTMContainer::new(&tm::Baro, &raw.pressure_data).unwrap();
                 tm_sender.send(container).await;
             }
             Err(e) => {
@@ -53,57 +47,52 @@ pub async fn imu_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
     mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
     mut led: Output<'static>,
-    accel_low_range_def: &'static dyn TelemetryDefinition,
-    accel_full_range_def: &'static dyn TelemetryDefinition,
+    accel_def: &'static dyn TelemetryDefinition,
     gyro_def: &'static dyn TelemetryDefinition,
-    temp_def: &'static dyn TelemetryDefinition,
 ) {
-    const IMU_LOOP_LEN: Duration = Duration::from_millis(50);
-    let mut ticker = Ticker::every(IMU_LOOP_LEN);
 
-    // config
-    imu.config.accel.dual_channel = true;
-    imu.config.accel.full_scale = lsm6dsv32::driver::AccelFS::G8;
+    imu.config = south_common::configs::imu_config::get_imu_config();
 
-    unwrap!(
-        imu.config
-            .accel
-            .set_odr(lsm6dsv32::driver::AccelODR::KHz1_92)
-    );
-    unwrap!(imu.config.gyro.set_odr(lsm6dsv32::driver::GyroODR::KHz1_92));
-
+    let mut imu = imu.enable_interrupt1();
     imu.commit_config().await;
 
     loop {
-        match imu.read_accel_dual_raw().await {
-            Ok((low, full)) => {
-                let container = UpperSensorTMContainer::new(accel_low_range_def, &low).unwrap();
-                tm_sender.send(container).await;
+        match imu.wait_for_data_ready_interrupt1(
+            true, // Accel
+            true, // Gyro
+            false, // Temp
+            LogicOp::AND,
+        ).await {
+            Ok(_) => {
+                match imu.read_accel_dual_raw().await {
+                    Ok(data) => {
+                        let data: AccelRaw = data.into();
+                        let container = UpperSensorTMContainer::new(accel_def, &data).unwrap();
+                        tm_sender.send(container).await;
+                    }
+                    Err(e) => error!("could not read accel: {}", e),
+                }
 
-                let container = UpperSensorTMContainer::new(accel_full_range_def, &full).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read accel: {}", e),
-        }
+                match imu.read_gyro_raw().await {
+                    Ok(data) => {
+                        let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
+                        tm_sender.send(container).await;
+                    }
+                    Err(e) => error!("could not read gyro: {}", e),
+                }
 
-        match imu.read_gyro_raw().await {
-            Ok(data) => {
-                let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
-                tm_sender.send(container).await;
-            }
-            Err(e) => error!("could not read gyro: {}", e),
-        }
-
-        match imu.read_temp_raw().await {
-            Ok(data) => {
-                let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
-                tm_sender.send(container).await;
+                // match imu.read_temp_raw().await {
+                //     Ok(data) => {
+                //         let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
+                //         tm_sender.send(container).await;
+                //     }
+                //     Err(e) => error!("could not read temp: {}", e),
+                // }
             }
             Err(e) => error!("could not read temp: {}", e),
         }
 
         led.toggle();
-        ticker.next().await;
     }
 }
 
@@ -111,37 +100,54 @@ pub async fn imu_thread(
 #[embassy_executor::task]
 pub async fn phoenix_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut phoenix: Phoenix<'static, PHOENIX_RX_BUF_SIZE>,
+    mut phoenix: PhoenixService<RingBufferedUartRx<'static>, UartTx<'static, Async>, EmbassyTimer, LiftoffPin<'static>, EmbassyClock, 256>,
 ) {
     loop {
-        match phoenix.next_message().await {
-            Ok(msg) => {
+        match phoenix.next_event().await {
+            Ok(PhoenixEvent::StateChanged(state)) => {
+                info!("phoenix state={:?}", Debug2Format(&state));
+            }
+            Ok(PhoenixEvent::Fix3D { tt3d_ms }) => {
+                info!("phoenix 3d lock tt3d_ms={=u64}", tt3d_ms);
+            }
+            Ok(PhoenixEvent::Warning(w)) => {
+                warn!("phoenix warning={:?}", Debug2Format(&w));
+            }
+            Ok(PhoenixEvent::CommandResponse(resp)) => {
+                info!("phoenix cmd resp: {}", resp.text.as_str());
+            }
+            Ok(PhoenixEvent::Message(msg)) => {
                 match msg {
-                    Message::F00(f00) => {
-                        info!("Received F00");
-                        let container =
-                            UpperSensorTMContainer::new(&tm::gps::Pos, &[f00.lat, f00.lon, f00.height]).unwrap();
-                        tm_sender.send(container).await;
-                        info!("nav: {}, system: {}, sv: {}", f00.nav_status, f00.system_status, f00.sv);
+                    phoenix::gps::GpsMessage::F40(msg) => {
+                        let ecef = Vector3i32 {
+                            x: msg.x_wgs84_cm as i32,
+                            y: msg.y_wgs84_cm as i32,
+                            z: msg.z_wgs84_cm as i32,
+                        };
 
-                        let status = (f00.nav_status & 0b11) << 0
-                                   | (f00.system_status & 0b11) << 2
-                                   | f00.sv.min(0b1111) << 4;
+                        let vel = Vector3i32 {
+                            x: msg.vx_wgs84_1e5_mps as i32,
+                            y: msg.vy_wgs84_1e5_mps as i32,
+                            z: msg.vz_wgs84_1e5_mps as i32,
+                        };
 
-                        let container =
-                            UpperSensorTMContainer::new(&tm::gps::Status, &status).unwrap();
+                        let state = msg.navigation_status
+                            | (msg.tracked_satellites << 2);
+
+                        let container = UpperSensorTMContainer::new(&tm::gps::Pos, &ecef).unwrap();
+                        tm_sender.send(container).await;
+
+                        let container = UpperSensorTMContainer::new(&tm::gps::Vel, &vel).unwrap();
+                        tm_sender.send(container).await;
+
+                        let container = UpperSensorTMContainer::new(&tm::gps::Status, &state).unwrap();
                         tm_sender.send(container).await;
                     }
-                    Message::F44(_f44) => {
-                        info!("Received F44");
-                    }
-                    Message::Unknown(id) => {
-                        warn!("Received unknown message with ID: {}", id);
-                    }
+                    _ => ()
                 }
             }
             Err(e) => {
-                error!("Error reading message: {:?}", e);
+                warn!("phoenix event error: {:?}", Debug2Format(&e));
             }
         }
     }

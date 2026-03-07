@@ -5,18 +5,18 @@ use embassy_stm32::{
         frame::FdFrame,
     },
 };
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Receiver, Sender}};
+use embassy_sync::{channel::{DynamicReceiver, DynamicSender}};
 use defmt::error;
 
 use south_common::{types::Telecommand, tmtc_system::TMValue};
 
-use crate::{UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE, CMD_CHANNEL_BUF_SIZE};
+use crate::UpperSensorTMContainer;
 
 // tm sending task
 #[embassy_executor::task]
 pub async fn tm_thread(
     mut can_sender: BufferedFdCanSender,
-    tm_channel: Receiver<'static, ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>,
+    tm_channel: DynamicReceiver<'static, UpperSensorTMContainer>,
 ) {
     loop {
         let container = tm_channel.receive().await;
@@ -33,7 +33,7 @@ pub async fn tm_thread(
 #[embassy_executor::task]
 pub async fn tc_thread(
     can_receiver: BufferedFdCanReceiver,
-    tc_channel: Sender<'static, ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>,
+    tc_channel: DynamicSender<'static, Telecommand>,
 ) {
     loop {
         match can_receiver.receive().await {

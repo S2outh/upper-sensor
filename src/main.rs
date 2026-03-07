@@ -4,6 +4,7 @@
 mod dts_drv;
 mod io_threads;
 mod sensor_threads;
+mod embassy_adapter;
 
 use defmt::*;
 use embassy_executor::Spawner;
@@ -18,17 +19,19 @@ use embassy_sync::{
 use embassy_time::{Duration, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
-use phoenix::driver::Phoenix;
+use phoenix::{gps::{DataRateInterval, GpsDriver}, phoenix::{
+    OutputConfig, PhoenixService, StartupConfig, StartupMode,
+}};
 use south_common::{
     tmtc_system::{TelemetryContainer, telemetry_container, TelemetryDefinition},
-    can_config::CanPeriphConfig,
-    definitions::telecommands,
+    configs::can_config::CanPeriphConfig,
+    definitions::internal_msgs,
     definitions::telemetry::upper_sensor as tm,
     types::Telecommand,
 };
 use static_cell::StaticCell;
 
-use crate::dts_drv::DtsDrv;
+use crate::{dts_drv::DtsDrv, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -72,14 +75,12 @@ const STARTUP_DELAY: u64 = 300;
 const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
-pub const PHOENIX_RX_BUF_SIZE: usize = 256;
-
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
 
 // static concurrency sync management types
-pub const TM_CHANNEL_BUF_SIZE: usize = 5;
-pub const CMD_CHANNEL_BUF_SIZE: usize = 5;
+const TM_CHANNEL_BUF_SIZE: usize = 5;
+const CMD_CHANNEL_BUF_SIZE: usize = 5;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
@@ -94,6 +95,10 @@ const C_TX_BUF_SIZE: usize = 64;
 
 static C_RX_BUF: StaticCell<RxFdBuf<C_RX_BUF_SIZE>> = StaticCell::new();
 static C_TX_BUF: StaticCell<TxFdBuf<C_TX_BUF_SIZE>> = StaticCell::new();
+
+// Static uart buffer
+const S_RX_BUF_SIZE: usize = 256;
+static S_RX_BUF: StaticCell<[u8; S_RX_BUF_SIZE]> = StaticCell::new();
 
 /// Watchdog petting task
 #[embassy_executor::task]
@@ -155,7 +160,7 @@ async fn main(spawner: Spawner) {
         CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
 
     can_configurator
-        .add_receive_topic(telecommands::Telecommand.id())
+        .add_receive_topic(internal_msgs::Telecommand.id())
         .unwrap();
 
     let can_interface = can_configurator.activate(
@@ -184,12 +189,12 @@ async fn main(spawner: Spawner) {
     )));
 
     let cs1 = Output::new(p.PB0, Level::High, Speed::High);
-    let int1_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Down, Irqs);
-    let int1_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Down, Irqs);
+    let int1_1 = ExtiInput::new(p.PA10, p.EXTI10, Pull::Up, Irqs);
+    let int1_2 = ExtiInput::new(p.PA11, p.EXTI11, Pull::Up, Irqs);
 
     let cs2 = Output::new(p.PB1, Level::High, Speed::High);
-    let int2_1 = ExtiInput::new(p.PA15, p.EXTI15, Pull::Down, Irqs);
-    let int2_2 = ExtiInput::new(p.PE4, p.EXTI4, Pull::Down, Irqs);
+    let int2_1 = ExtiInput::new(p.PA15, p.EXTI15, Pull::Up, Irqs);
+    let int2_2 = ExtiInput::new(p.PE4, p.EXTI4, Pull::Up, Irqs);
 
     let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
     let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
@@ -197,8 +202,26 @@ async fn main(spawner: Spawner) {
     // uart/phoenix setup
     let mut config = usart::Config::default();
     config.baudrate = 57600;
-    let uart = Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config).unwrap();
-    let phoenix: Phoenix<_> = Phoenix::new(uart);
+    let (uart_tx, uart_rx) = Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config).unwrap().split();
+
+    let startup = StartupConfig {
+        mode: StartupMode::Regular,
+        initial_position: None,
+        initial_epoch: None,
+        outputs: OutputConfig {
+            f00: Some(DataRateInterval::Disabled),
+            f40: Some(DataRateInterval::from_hz(1, 1).unwrap()),
+            f48: Some(DataRateInterval::Disabled),
+        },
+    };
+    
+    let driver = GpsDriver::<_, _, _, 256>::new(
+        uart_rx.into_ring_buffered(S_RX_BUF.init([0; _])),
+        uart_tx,
+        EmbassyTimer
+    );
+    let liftoff = LiftoffPin(Output::new(p.PA0, Level::Low, Speed::Low));
+    let phoenix = PhoenixService::new(driver, EmbassyClock, liftoff, startup);
 
     // internal temperature sensor
     let mut dts_config = dts::Config::default();
@@ -223,26 +246,22 @@ async fn main(spawner: Spawner) {
         tm_channel.dyn_sender(),
         imu1,
         yellow,
-        &tm::imu1::AccelLowRange,
-        &tm::imu1::AccelFullRange,
+        &tm::imu1::Accel,
         &tm::imu1::Gyro,
-        &tm::imu1::Temp,
     ));
     spawner.must_spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
         imu2,
         red,
-        &tm::imu2::AccelLowRange,
-        &tm::imu2::AccelFullRange,
+        &tm::imu2::Accel,
         &tm::imu2::Gyro,
-        &tm::imu2::Temp,
     ));
     spawner.must_spawn(sensor_threads::baro_thread(tm_channel.dyn_sender(), baro, blue));
     spawner.must_spawn(sensor_threads::phoenix_thread(tm_channel.dyn_sender(), phoenix));
 
     // tmtc io threads
-    spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.receiver()));
-    spawner.must_spawn(io_threads::tc_thread(can_interface.reader(), cmd_channel.sender()));
+    spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.dyn_receiver()));
+    spawner.must_spawn(io_threads::tc_thread(can_interface.reader(), cmd_channel.dyn_sender()));
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;
