@@ -2,14 +2,29 @@
 #![no_main]
 
 mod dts_drv;
+mod embassy_adapter;
 mod io_threads;
 mod sensor_threads;
-mod embassy_adapter;
+
+use portable_atomic::AtomicU64;
 
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{self, CanConfigurator, RxFdBuf, TxFdBuf}, dts::{self, Dts}, exti::{self, ExtiInput}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::typelevel::{EXTI4, EXTI15_10}, mode::Async, peripherals::{FDCAN1, I2C1, IWDG1, USART6}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, usart::{self, Uart}, wdg::IndependentWatchdog
+    Config, bind_interrupts,
+    can::{self, CanConfigurator, RxFdBuf, TxFdBuf},
+    dts::{self, Dts},
+    exti::{self, ExtiInput},
+    gpio::{Level, Output, Pull, Speed},
+    i2c,
+    interrupt::typelevel::{EXTI4, EXTI15_10},
+    mode::Async,
+    peripherals::{FDCAN1, I2C1, IWDG1, USART6},
+    rcc,
+    spi::{self, Spi, mode::Master},
+    time::{khz, mhz},
+    usart::{self, Uart},
+    wdg::IndependentWatchdog,
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
@@ -19,19 +34,23 @@ use embassy_sync::{
 use embassy_time::{Duration, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
-use phoenix::{gps::{DataRateInterval, GpsDriver}, phoenix::{
-    OutputConfig, PhoenixService, StartupConfig, StartupMode,
-}};
+use phoenix::{
+    gps::{DataRateInterval, GpsDriver},
+    phoenix::{OutputConfig, PhoenixService, StartupConfig, StartupMode},
+};
 use south_common::{
-    tmtc_system::{TelemetryContainer, telemetry_container, TelemetryDefinition},
     configs::can_config::CanPeriphConfig,
     definitions::internal_msgs,
     definitions::telemetry::upper_sensor as tm,
+    tmtc_system::{TelemetryContainer, TelemetryDefinition, telemetry_container},
     types::Telecommand,
 };
 use static_cell::StaticCell;
 
-use crate::{dts_drv::DtsDrv, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
+use crate::{
+    dts_drv::DtsDrv,
+    embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin},
+};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -55,14 +74,14 @@ bind_interrupts!(struct Irqs {
 fn get_rcc_config() -> rcc::Config {
     let mut rcc_config = rcc::Config::default();
     rcc_config.hsi = Some(rcc::HSIPrescaler::DIV1); // 64 MHz
-    rcc_config.sys = rcc::Sysclk::HSI;              // cpu runns with 64 MHz
+    rcc_config.sys = rcc::Sysclk::HSI; // cpu runns with 64 MHz
     rcc_config.pll1 = Some(rcc::Pll {
         source: rcc::PllSource::HSI,
-        prediv: rcc::PllPreDiv::DIV8,               // 8 MHz
-        mul: rcc::PllMul::MUL40,                    // 320 MHz
-        divp: None,                                 // 320 MHz
-        divq: Some(rcc::PllDiv::DIV10),             // 32 MHz
-        divr: Some(rcc::PllDiv::DIV5),              // 64 MHz
+        prediv: rcc::PllPreDiv::DIV8,   // 8 MHz
+        mul: rcc::PllMul::MUL40,        // 320 MHz
+        divp: None,                     // 320 MHz
+        divq: Some(rcc::PllDiv::DIV10), // 32 MHz
+        divr: Some(rcc::PllDiv::DIV5),  // 64 MHz
     });
     rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q; // can runns with 32 MHz
     rcc_config.voltage_scale = rcc::VoltageScale::Scale1;
@@ -74,6 +93,8 @@ const STARTUP_DELAY: u64 = 300;
 
 const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
+
+static TIME_REF: AtomicU64 = AtomicU64::new(0);
 
 // TM container
 type UpperSensorTMContainer = telemetry_container!(tm);
@@ -126,7 +147,6 @@ pub async fn dts_thread(
     }
 }
 
-
 /// program entry
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -137,11 +157,7 @@ async fn main(spawner: Spawner) {
     const FW_VERSION: &str = env!("FW_VERSION");
     const FW_HASH: &str = env!("FW_HASH");
 
-    info!(
-        "Launching: FW version={} hash={}",
-        FW_VERSION,
-        FW_HASH
-    );
+    info!("Launching: FW version={} hash={}", FW_VERSION, FW_HASH);
 
     // unleash independent watchdog
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, WATCHDOG_TIMEOUT_US);
@@ -161,6 +177,8 @@ async fn main(spawner: Spawner) {
 
     can_configurator
         .add_receive_topic(internal_msgs::Telecommand.id())
+        .unwrap()
+        .add_receive_topic(internal_msgs::TimesyncRequest.id())
         .unwrap();
 
     let can_interface = can_configurator.activate(
@@ -202,7 +220,10 @@ async fn main(spawner: Spawner) {
     // uart/phoenix setup
     let mut config = usart::Config::default();
     config.baudrate = 57600;
-    let (uart_tx, uart_rx) = Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config).unwrap().split();
+    let (uart_tx, uart_rx) =
+        Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config)
+            .unwrap()
+            .split();
 
     let startup = StartupConfig {
         mode: StartupMode::Regular,
@@ -214,11 +235,11 @@ async fn main(spawner: Spawner) {
             f48: Some(DataRateInterval::Disabled),
         },
     };
-    
+
     let driver = GpsDriver::<_, _, _, 256>::new(
         uart_rx.into_ring_buffered(S_RX_BUF.init([0; _])),
         uart_tx,
-        EmbassyTimer
+        EmbassyTimer,
     );
     let liftoff = LiftoffPin(Output::new(p.PA0, Level::Low, Speed::Low));
     let phoenix = PhoenixService::new(driver, EmbassyClock, liftoff, startup);
@@ -256,12 +277,25 @@ async fn main(spawner: Spawner) {
         &tm::imu2::Accel,
         &tm::imu2::Gyro,
     ));
-    spawner.must_spawn(sensor_threads::baro_thread(tm_channel.dyn_sender(), baro, blue));
-    spawner.must_spawn(sensor_threads::phoenix_thread(tm_channel.dyn_sender(), phoenix));
+    spawner.must_spawn(sensor_threads::baro_thread(
+        tm_channel.dyn_sender(),
+        baro,
+        blue,
+    ));
+    spawner.must_spawn(sensor_threads::phoenix_thread(
+        tm_channel.dyn_sender(),
+        phoenix,
+    ));
 
     // tmtc io threads
-    spawner.must_spawn(io_threads::tm_thread(can_interface.writer(), tm_channel.dyn_receiver()));
-    spawner.must_spawn(io_threads::tc_thread(can_interface.reader(), cmd_channel.dyn_sender()));
+    spawner.must_spawn(io_threads::can_sender_thread(
+        can_interface.writer(),
+        tm_channel.dyn_receiver(),
+    ));
+    spawner.must_spawn(io_threads::can_receiver_thread(
+        can_interface.reader(),
+        cmd_channel.dyn_sender(),
+    ));
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;

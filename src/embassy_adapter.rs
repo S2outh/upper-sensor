@@ -9,11 +9,7 @@ use phoenix::winmon::TimeoutTimer;
 pub struct EmbassyTimer;
 
 impl TimeoutTimer for EmbassyTimer {
-    async fn timeout<F: Future>(
-        &mut self,
-        duration: Duration,
-        fut: F,
-    ) -> Result<F::Output, ()> {
+    async fn timeout<F: Future>(&mut self, duration: Duration, fut: F) -> Result<F::Output, ()> {
         with_timeout(to_embassy_duration(duration), fut)
             .await
             .map_err(|_| ())

@@ -26,9 +26,10 @@ static_cell = { version = "2.1.1", features = ["nightly"] }
 
 south-common = { version = "3.0.0", features = ["h7"], git = "ssh://git@github.com/S2outh/south-common.git" }
 
-lsm6dsv32 = { git = "ssh://git@github.com/S2outh/imu-driver.git" }
+lsm6dsv32 = { git = "ssh://git@github.com/S2outh/imu-driver.git", features = ["debug"] }
 hscmrnn030pa = { git = "ssh://git@github.com/S2outh/baro-driver.git" }
 phoenix = { git = "ssh://git@github.com/S2outh/phoenix-vibing.git", branch = "dev" }
+portable-atomic = "1.13.1"
 
 [profile.release]
 debug = 2
