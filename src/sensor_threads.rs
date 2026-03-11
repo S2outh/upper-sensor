@@ -1,17 +1,27 @@
-use embassy_stm32::{gpio::Output, mode::Async, peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9}, usart::{RingBufferedUartRx, UartTx}};
-use embassy_sync::channel::DynamicSender;
-use embassy_time::{Duration, Ticker};
 use defmt::{Debug2Format, error, info, warn};
+use embassy_stm32::{
+    gpio::Output,
+    mode::Async,
+    peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9},
+    usart::{RingBufferedUartRx, UartTx},
+};
+use embassy_sync::channel::DynamicSender;
+use embassy_time::{Duration, Instant, Ticker};
 
-use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 use hscmrnn030pa::driver::Baro;
+use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 
 use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use south_common::{
-    definitions::telemetry::upper_sensor as tm, tmtc_system::TelemetryDefinition, types::{Vector3i32, upper_sensor::AccelRaw},
+    definitions::telemetry::upper_sensor as tm,
+    tmtc_system::TelemetryDefinition,
+    types::{Vector3i32, upper_sensor::AccelRaw},
 };
 
-use crate::{Irqs, UpperSensorTMContainer, embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin}};
+use crate::{
+    Irqs, UpperSensorTMContainer,
+    embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin},
+};
 
 // baro polling task
 #[embassy_executor::task]
@@ -27,8 +37,7 @@ pub async fn baro_thread(
             Ok(raw) => {
                 // let temp = raw.baro_temp_convert();
                 // let pressure = raw.baro_pressure_convert_pa();
-                let container =
-                    UpperSensorTMContainer::new(&tm::Baro, &raw.pressure_data).unwrap();
+                let container = UpperSensorTMContainer::new(&tm::Baro, &raw.pressure_data).unwrap();
                 tm_sender.send(container).await;
             }
             Err(e) => {
@@ -50,19 +59,21 @@ pub async fn imu_thread(
     accel_def: &'static dyn TelemetryDefinition,
     gyro_def: &'static dyn TelemetryDefinition,
 ) {
-
     imu.config = south_common::configs::imu_config::get_imu_config();
 
     let mut imu = imu.enable_interrupt1();
     imu.commit_config().await;
 
     loop {
-        match imu.wait_for_data_ready_interrupt1(
-            true, // Accel
-            true, // Gyro
-            false, // Temp
-            LogicOp::AND,
-        ).await {
+        match imu
+            .wait_for_data_ready_interrupt1(
+                true,  // Accel
+                true,  // Gyro
+                false, // Temp
+                LogicOp::AND,
+            )
+            .await
+        {
             Ok(_) => {
                 match imu.read_accel_dual_raw().await {
                     Ok(data) => {
@@ -96,11 +107,27 @@ pub async fn imu_thread(
     }
 }
 
+fn gps_to_unix_us(week: u16, ms_of_week: u64) -> u64 {
+    const LEAP_SECONDS: u64 = 18; // leap seconds between 1980 and 2026
+    const MS_PER_GPS_WEEK: u64 = 7 * 24 * 60 * 60 * 1000;
+    const EPOCH_DIFF_MS: u64 = 315964800000;
+
+    let unix_ms = EPOCH_DIFF_MS + LEAP_SECONDS * 1000 + MS_PER_GPS_WEEK * week as u64 + ms_of_week;
+
+    unix_ms * 1000
+}
 // phoenix polling task
 #[embassy_executor::task]
 pub async fn phoenix_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut phoenix: PhoenixService<RingBufferedUartRx<'static>, UartTx<'static, Async>, EmbassyTimer, LiftoffPin<'static>, EmbassyClock, 256>,
+    mut phoenix: PhoenixService<
+        RingBufferedUartRx<'static>,
+        UartTx<'static, Async>,
+        EmbassyTimer,
+        LiftoffPin<'static>,
+        EmbassyClock,
+        256,
+    >,
 ) {
     loop {
         match phoenix.next_event().await {
@@ -119,6 +146,14 @@ pub async fn phoenix_thread(
             Ok(PhoenixEvent::Message(msg)) => {
                 match msg {
                     phoenix::gps::GpsMessage::F40(msg) => {
+                        // syncing time
+                        super::TIME_REF.store(
+                            gps_to_unix_us(msg.gps_week, msg.gps_seconds_of_week_ms)
+                                - Instant::now().as_micros(),
+                            core::sync::atomic::Ordering::Release,
+                        );
+
+                        // sending tm
                         let ecef = Vector3i32 {
                             x: msg.x_wgs84_cm as i32,
                             y: msg.y_wgs84_cm as i32,
@@ -131,8 +166,7 @@ pub async fn phoenix_thread(
                             z: msg.vz_wgs84_1e5_mps as i32,
                         };
 
-                        let state = msg.navigation_status
-                            | (msg.tracked_satellites << 2);
+                        let state = msg.navigation_status | (msg.tracked_satellites << 2);
 
                         let container = UpperSensorTMContainer::new(&tm::gps::Pos, &ecef).unwrap();
                         tm_sender.send(container).await;
@@ -140,10 +174,11 @@ pub async fn phoenix_thread(
                         let container = UpperSensorTMContainer::new(&tm::gps::Vel, &vel).unwrap();
                         tm_sender.send(container).await;
 
-                        let container = UpperSensorTMContainer::new(&tm::gps::Status, &state).unwrap();
+                        let container =
+                            UpperSensorTMContainer::new(&tm::gps::Status, &state).unwrap();
                         tm_sender.send(container).await;
                     }
-                    _ => ()
+                    _ => (),
                 }
             }
             Err(e) => {

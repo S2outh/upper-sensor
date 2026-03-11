@@ -1,46 +1,87 @@
-
-use embassy_stm32::{
-    can::{
-        BufferedFdCanReceiver, BufferedFdCanSender,
-        frame::FdFrame,
-    },
-};
-use embassy_sync::{channel::{DynamicReceiver, DynamicSender}};
 use defmt::error;
+use embassy_futures::select::{Either, select};
+use embassy_stm32::can::{BufferedFdCanReceiver, BufferedFdCanSender, frame::FdFrame};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{DynamicReceiver, DynamicSender}, signal::Signal};
 
-use south_common::{types::Telecommand, tmtc_system::TMValue};
+use embassy_time::Instant;
+use south_common::{
+    definitions::internal_msgs,
+    tmtc_system::{_internal::InternalTelemetryDefinition, TelemetryContainer, TMValue, telemetry_container},
+    types::{Telecommand, Timesync},
+};
 
 use crate::UpperSensorTMContainer;
 
+
+// Timesync stuff
+static TIMESYNC_REQUEST: Signal<ThreadModeRawMutex, u8> = Signal::new();
+const TIMESYNC_PRIORITY: u8 = 0;
+type TimesyncContainer = telemetry_container!(internal_msgs);
+
 // tm sending task
 #[embassy_executor::task]
-pub async fn tm_thread(
+pub async fn can_sender_thread(
     mut can_sender: BufferedFdCanSender,
     tm_channel: DynamicReceiver<'static, UpperSensorTMContainer>,
 ) {
     loop {
-        let container = tm_channel.receive().await;
-        match FdFrame::new_standard(container.id(), container.bytes()) {
-            Ok(frame) => {
+        match select(tm_channel.receive(), TIMESYNC_REQUEST.wait()).await {
+            // Sending telemetry
+            Either::First(container) => {
+                let frame = FdFrame::new_standard(container.id(), container.bytes()).unwrap();
+                can_sender.write(frame).await;
+            },
+            // Sending Timesync answer
+            Either::Second(request_id) => {
+                let diff = super::TIME_REF.load(core::sync::atomic::Ordering::Acquire);
+                if diff == 0 { continue }
+                let unix_time = diff + Instant::now().as_micros();
+                let priority = TIMESYNC_PRIORITY;
+                let msg = Timesync {
+                    request_id,
+                    priority,
+                    unix_time,
+                };
+                let container = TimesyncContainer::new(&internal_msgs::TimesyncAnswer, &msg).unwrap();
+                // Temporary fix
+                let mut bytes = [0u8; 12];
+                bytes[..10].copy_from_slice(container.bytes());
+                let frame = FdFrame::new_standard(container.id(), &bytes).unwrap();
+
                 can_sender.write(frame).await;
             }
-            Err(e) => error!("error constructing can message: {}", e),
         }
     }
 }
 
 // tc receiving task
 #[embassy_executor::task]
-pub async fn tc_thread(
+pub async fn can_receiver_thread(
     can_receiver: BufferedFdCanReceiver,
     tc_channel: DynamicSender<'static, Telecommand>,
 ) {
     loop {
         match can_receiver.receive().await {
-            Ok(envelope) => match Telecommand::read(envelope.frame.data()) {
-                Ok(cmd) => tc_channel.send(cmd.1).await,
-                Err(_) => error!("error parsing tc"),
-            },
+            Ok(envelope) => {
+                if let embedded_can::Id::Standard(id) = envelope.frame.id() {
+                    match id.as_raw() {
+                        internal_msgs::Telecommand::ID => {
+                            match Telecommand::read(envelope.frame.data()) {
+                                Ok(cmd) => tc_channel.send(cmd.1).await,
+                                Err(_) => error!("error parsing tc"),
+                            }
+                        }
+                        internal_msgs::TimesyncRequest::ID => {
+                            if let Some(request_id) = envelope.frame.data().get(0) {
+                                TIMESYNC_REQUEST.signal(*request_id);
+                            }
+                        },
+                        _ => defmt::unreachable!(),
+                    }
+                } else {
+                    defmt::unreachable!()
+                };
+            }
             Err(e) => error!("error in frame! {}", e),
         }
     }
