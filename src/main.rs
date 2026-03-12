@@ -19,7 +19,7 @@ use embassy_stm32::{
     i2c,
     interrupt::typelevel::{EXTI4, EXTI15_10},
     mode::Async,
-    peripherals::{FDCAN2, I2C1, IWDG1, USART6},
+    peripherals::{FDCAN1, FDCAN2, I2C1, IWDG1, USART6},
     rcc,
     spi::{self, Spi, mode::Master},
     time::{khz, mhz},
@@ -56,8 +56,8 @@ use {defmt_rtt as _, panic_probe as _};
 
 // bind interrupts
 bind_interrupts!(struct Irqs {
-    // FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
-    // FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
+    FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
+    FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
 
     FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
     FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
@@ -172,15 +172,15 @@ async fn main(spawner: Spawner) {
 
     // -- CAN configuration
     // can 1 configuration
-    // let mut can_configurator =
-    //     CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
+    let mut can_configurator =
+        CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
 
     // can 2 configuration
-    let mut can_configurator =
-        CanPeriphConfig::new(CanConfigurator::new(p.FDCAN2, p.PB12, p.PB13, Irqs));
+    // let mut can_configurator =
+    //     CanPeriphConfig::new(CanConfigurator::new(p.FDCAN2, p.PB12, p.PB13, Irqs));
 
-    // let _can_1_standby = Output::new(p.PE2, Level::Low, Speed::Low);
-    let _can_2_standby = Output::new(p.PE3, Level::Low, Speed::Low);
+    let _can_1_standby = Output::new(p.PE2, Level::Low, Speed::Low);
+    // let _can_2_standby = Output::new(p.PE3, Level::Low, Speed::Low);
 
     can_configurator
         .add_receive_topic(internal_msgs::Telecommand.id())

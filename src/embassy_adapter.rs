@@ -20,7 +20,7 @@ pub struct EmbassyClock;
 
 impl ServiceClock for EmbassyClock {
     fn now_ms(&mut self) -> u64 {
-        Instant::now().as_ticks() / 1000
+        Instant::now().as_millis()
     }
 }
 
