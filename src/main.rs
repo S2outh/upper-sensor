@@ -8,7 +8,7 @@ mod sensor_threads;
 
 use portable_atomic::AtomicU64;
 
-use defmt::*;
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     Config, bind_interrupts,
@@ -42,7 +42,7 @@ use south_common::{
     configs::can_config::CanPeriphConfig,
     definitions::internal_msgs,
     definitions::telemetry::upper_sensor as tm,
-    tmtc_system::{TelemetryContainer, TelemetryDefinition, telemetry_container},
+    tmtc_system::{TelemetryDefinition, fd_compat_telemetry_container},
     types::Telecommand,
 };
 use static_cell::StaticCell;
@@ -100,7 +100,7 @@ const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 static TIME_REF: AtomicU64 = AtomicU64::new(0);
 
 // TM container
-type UpperSensorTMContainer = telemetry_container!(tm);
+type UpperSensorTMContainer = fd_compat_telemetry_container!(tm);
 
 // static concurrency sync management types
 const TM_CHANNEL_BUF_SIZE: usize = 5;
