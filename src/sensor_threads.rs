@@ -112,7 +112,7 @@ fn gps_to_unix_us(week: u16, ms_of_week: u64) -> u64 {
     const MS_PER_GPS_WEEK: u64 = 7 * 24 * 60 * 60 * 1000;
     const EPOCH_DIFF_MS: u64 = 315964800000;
 
-    let unix_ms = EPOCH_DIFF_MS + LEAP_SECONDS * 1000 + MS_PER_GPS_WEEK * week as u64 + ms_of_week;
+    let unix_ms = EPOCH_DIFF_MS - LEAP_SECONDS * 1000 + MS_PER_GPS_WEEK * week as u64 + ms_of_week;
 
     unix_ms * 1000
 }
