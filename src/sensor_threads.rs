@@ -14,7 +14,7 @@ use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6d
 use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use south_common::{
     definitions::telemetry::upper_sensor as tm,
-    tmtc_system::TelemetryDefinition,
+    chell::ChellDefinition,
     types::{Vector3i32, upper_sensor::AccelRaw},
 };
 
@@ -56,8 +56,8 @@ pub async fn imu_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
     mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
     mut led: Output<'static>,
-    accel_def: &'static dyn TelemetryDefinition,
-    gyro_def: &'static dyn TelemetryDefinition,
+    accel_def: &'static dyn ChellDefinition,
+    gyro_def: &'static dyn ChellDefinition,
 ) {
     imu.config = south_common::configs::imu_config::get_imu_config();
 

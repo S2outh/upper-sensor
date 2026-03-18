@@ -42,7 +42,7 @@ use south_common::{
     configs::can_config::CanPeriphConfig,
     definitions::internal_msgs,
     definitions::telemetry::upper_sensor as tm,
-    tmtc_system::{TelemetryDefinition, fd_compat_telemetry_container},
+    chell::{ChellDefinition, fd_compat_chell_container},
     types::Telecommand,
 };
 use static_cell::StaticCell;
@@ -100,7 +100,7 @@ const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 static TIME_REF: AtomicU64 = AtomicU64::new(0);
 
 // TM container
-type UpperSensorTMContainer = fd_compat_telemetry_container!(tm);
+type UpperSensorTMContainer = fd_compat_chell_container!(tm);
 
 // static concurrency sync management types
 const TM_CHANNEL_BUF_SIZE: usize = 5;
