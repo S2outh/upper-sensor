@@ -6,7 +6,7 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{DynamicRec
 use embassy_time::Instant;
 use south_common::{
     definitions::internal_msgs,
-    tmtc_system::{_internal::InternalTelemetryDefinition, TelemetryContainer, TMValue, telemetry_container},
+    chell::{ChellValue, match_value, fd_compat_chell_container},
     types::{Telecommand, Timesync},
 };
 
@@ -16,7 +16,7 @@ use crate::UpperSensorTMContainer;
 // Timesync stuff
 static TIMESYNC_REQUEST: Signal<ThreadModeRawMutex, u8> = Signal::new();
 const TIMESYNC_PRIORITY: u8 = 0;
-type TimesyncContainer = telemetry_container!(internal_msgs);
+type TimesyncContainer = fd_compat_chell_container!(internal_msgs::TimesyncAnswer);
 
 // tm sending task
 #[embassy_executor::task]
@@ -28,7 +28,7 @@ pub async fn can_sender_thread(
         match select(tm_channel.receive(), TIMESYNC_REQUEST.wait()).await {
             // Sending telemetry
             Either::First(container) => {
-                let frame = FdFrame::new_standard(container.id(), container.bytes()).unwrap();
+                let frame = FdFrame::new_standard(container.id(), container.fd_bytes()).unwrap();
                 can_sender.write(frame).await;
             },
             // Sending Timesync answer
@@ -43,10 +43,7 @@ pub async fn can_sender_thread(
                     unix_time,
                 };
                 let container = TimesyncContainer::new(&internal_msgs::TimesyncAnswer, &msg).unwrap();
-                // Temporary fix
-                let mut bytes = [0u8; 12];
-                bytes[..10].copy_from_slice(container.bytes());
-                let frame = FdFrame::new_standard(container.id(), &bytes).unwrap();
+                let frame = FdFrame::new_standard(container.id(), container.fd_bytes()).unwrap();
 
                 can_sender.write(frame).await;
             }
@@ -64,20 +61,19 @@ pub async fn can_receiver_thread(
         match can_receiver.receive().await {
             Ok(envelope) => {
                 if let embedded_can::Id::Standard(id) = envelope.frame.id() {
-                    match id.as_raw() {
-                        internal_msgs::Telecommand::ID => {
+                    match_value!(internal_msgs::from_id(id.as_raw()).unwrap(), {
+                        internal_msgs::Telecommand => {
                             match Telecommand::read(envelope.frame.data()) {
                                 Ok(cmd) => tc_channel.send(cmd.1).await,
                                 Err(_) => error!("error parsing tc"),
                             }
-                        }
-                        internal_msgs::TimesyncRequest::ID => {
+                        },
+                        internal_msgs::TimesyncRequest => {
                             if let Some(request_id) = envelope.frame.data().get(0) {
                                 TIMESYNC_REQUEST.signal(*request_id);
                             }
                         },
-                        _ => defmt::unreachable!(),
-                    }
+                    });
                 } else {
                     defmt::unreachable!()
                 };

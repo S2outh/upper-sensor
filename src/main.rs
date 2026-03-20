@@ -8,7 +8,7 @@ mod sensor_threads;
 
 use portable_atomic::AtomicU64;
 
-use defmt::*;
+use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     Config, bind_interrupts,
@@ -19,7 +19,7 @@ use embassy_stm32::{
     i2c,
     interrupt::typelevel::{EXTI4, EXTI15_10},
     mode::Async,
-    peripherals::{FDCAN1, I2C1, IWDG1, USART6},
+    peripherals::{FDCAN1, FDCAN2, I2C1, IWDG1, USART6},
     rcc,
     spi::{self, Spi, mode::Master},
     time::{khz, mhz},
@@ -42,7 +42,7 @@ use south_common::{
     configs::can_config::CanPeriphConfig,
     definitions::internal_msgs,
     definitions::telemetry::upper_sensor as tm,
-    tmtc_system::{TelemetryContainer, TelemetryDefinition, telemetry_container},
+    chell::{ChellDefinition, fd_compat_chell_container},
     types::Telecommand,
 };
 use static_cell::StaticCell;
@@ -58,6 +58,9 @@ use {defmt_rtt as _, panic_probe as _};
 bind_interrupts!(struct Irqs {
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
     FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
+
+    FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
+    FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
 
     I2C1_EV => i2c::EventInterruptHandler<I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
@@ -97,7 +100,7 @@ const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 static TIME_REF: AtomicU64 = AtomicU64::new(0);
 
 // TM container
-type UpperSensorTMContainer = telemetry_container!(tm);
+type UpperSensorTMContainer = fd_compat_chell_container!(tm);
 
 // static concurrency sync management types
 const TM_CHANNEL_BUF_SIZE: usize = 5;
@@ -167,13 +170,17 @@ async fn main(spawner: Spawner) {
     let tm_channel = TMC.init(Channel::new());
     let cmd_channel = CMDC.init(Channel::new());
 
-    // set can standby pin to low
-    let _can_standby = Output::new(p.PE2, Level::Low, Speed::Low);
-    // let _can_2_standby = Output::new(p.PE3, Level::High, Speed::Low);
-
     // -- CAN configuration
+    // can 1 configuration
     let mut can_configurator =
         CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
+
+    // can 2 configuration
+    // let mut can_configurator =
+    //     CanPeriphConfig::new(CanConfigurator::new(p.FDCAN2, p.PB12, p.PB13, Irqs));
+
+    let _can_1_standby = Output::new(p.PE2, Level::Low, Speed::Low);
+    // let _can_2_standby = Output::new(p.PE3, Level::Low, Speed::Low);
 
     can_configurator
         .add_receive_topic(internal_msgs::Telecommand.id())
