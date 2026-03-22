@@ -6,7 +6,7 @@ use embassy_stm32::{
     usart::{RingBufferedUartRx, UartTx},
 };
 use embassy_sync::channel::DynamicSender;
-use embassy_time::{Duration, Instant, Ticker};
+use embassy_time::{Duration, Ticker};
 
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
@@ -107,14 +107,12 @@ pub async fn imu_thread(
     }
 }
 
-fn gps_to_unix_us(week: u16, ms_of_week: u64) -> u64 {
+fn gps_to_unix_second_ceil(week: u16, ms_of_week: u64) -> u64 {
     const LEAP_SECONDS: u64 = 18; // leap seconds between 1980 and 2026
-    const MS_PER_GPS_WEEK: u64 = 7 * 24 * 60 * 60 * 1000;
-    const EPOCH_DIFF_MS: u64 = 315964800000;
+    const SECONDS_PER_GPS_WEEK: u64 = 7 * 24 * 60 * 60;
+    const EPOCH_DIFF_SECONDS: u64 = 315964800;
 
-    let unix_ms = EPOCH_DIFF_MS - LEAP_SECONDS * 1000 + MS_PER_GPS_WEEK * week as u64 + ms_of_week;
-
-    unix_ms * 1000
+    EPOCH_DIFF_SECONDS - LEAP_SECONDS + SECONDS_PER_GPS_WEEK * week as u64 + ms_of_week / 1000 + 1
 }
 // phoenix polling task
 #[embassy_executor::task]
@@ -147,9 +145,8 @@ pub async fn phoenix_thread(
                 match msg {
                     phoenix::gps::GpsMessage::F40(msg) => {
                         // syncing time
-                        super::TIME_REF.store(
-                            gps_to_unix_us(msg.gps_week, msg.gps_seconds_of_week_ms)
-                                - Instant::now().as_micros(),
+                        super::TIME_REF_UPD_SECOND.store(
+                            gps_to_unix_second_ceil(msg.gps_week, msg.gps_seconds_of_week_ms),
                             core::sync::atomic::Ordering::Release,
                         );
 

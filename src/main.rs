@@ -6,32 +6,22 @@ mod embassy_adapter;
 mod io_threads;
 mod sensor_threads;
 
+use core::{cell::RefCell, sync::atomic::Ordering};
+
+use cortex_m_rt::interrupt;
 use portable_atomic::AtomicU64;
 
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts,
-    can::{self, CanConfigurator, RxFdBuf, TxFdBuf},
-    dts::{self, Dts},
-    exti::{self, ExtiInput},
-    gpio::{Level, Output, Pull, Speed},
-    i2c,
-    interrupt::typelevel::{EXTI4, EXTI15_10},
-    mode::Async,
-    peripherals::{FDCAN1, FDCAN2, I2C1, IWDG1, USART6},
-    rcc,
-    spi::{self, Spi, mode::Master},
-    time::{khz, mhz},
-    usart::{self, Uart},
-    wdg::IndependentWatchdog,
+    Config, bind_interrupts, can::{self, CanConfigurator, RxFdBuf, TxFdBuf}, dma, dts::{self, Dts}, exti::{self, ExtiInput, TriggerEdge}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::{self, typelevel::{EXTI4, EXTI15_10}}, mode::{Async, Blocking}, peripherals::{DMA1_CH1, DMA1_CH2, DMA1_CH3, DMA1_CH4, DMA2_CH2, DMA2_CH3, FDCAN1, FDCAN2, I2C1, IWDG1, USART6}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, usart::{self, Uart}, wdg::IndependentWatchdog
 };
 use embassy_sync::{
-    blocking_mutex::raw::ThreadModeRawMutex,
+    blocking_mutex::{self, raw::{CriticalSectionRawMutex, ThreadModeRawMutex}},
     channel::{Channel, DynamicSender},
-    mutex::Mutex,
+    mutex::Mutex, once_lock::OnceLock,
 };
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
 use phoenix::{
@@ -39,11 +29,7 @@ use phoenix::{
     phoenix::{OutputConfig, PhoenixService, StartupConfig, StartupMode},
 };
 use south_common::{
-    configs::can_config::CanPeriphConfig,
-    definitions::internal_msgs,
-    definitions::telemetry::upper_sensor as tm,
-    chell::{ChellDefinition, fd_compat_chell_container},
-    types::Telecommand,
+    chell::{ChellDefinition, fd_compat_chell_union}, configs::can_config::CanPeriphConfig, definitions::{internal_msgs, telemetry::upper_sensor as tm}, types::Telecommand
 };
 use static_cell::StaticCell;
 
@@ -64,6 +50,11 @@ bind_interrupts!(struct Irqs {
 
     I2C1_EV => i2c::EventInterruptHandler<I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
+    DMA1_STREAM1 => dma::InterruptHandler<DMA1_CH1>;
+    DMA1_STREAM2 => dma::InterruptHandler<DMA1_CH2>;
+
+    DMA2_STREAM2 => dma::InterruptHandler<DMA2_CH2>;
+    DMA2_STREAM3 => dma::InterruptHandler<DMA2_CH3>;
 
     DTS => dts::InterruptHandler;
 
@@ -71,6 +62,8 @@ bind_interrupts!(struct Irqs {
     EXTI15_10 => exti::InterruptHandler<EXTI15_10>;
 
     USART6 => usart::InterruptHandler<USART6>;
+    DMA1_STREAM3 => dma::InterruptHandler<DMA1_CH3>;
+    DMA1_STREAM4 => dma::InterruptHandler<DMA1_CH4>;
 });
 
 /// config rcc
@@ -98,9 +91,10 @@ const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
 static TIME_REF: AtomicU64 = AtomicU64::new(0);
+static TIME_REF_UPD_SECOND: AtomicU64 = AtomicU64::new(0);
 
 // TM container
-type UpperSensorTMContainer = fd_compat_chell_container!(tm);
+type UpperSensorTMContainer = fd_compat_chell_union!(tm);
 
 // static concurrency sync management types
 const TM_CHANNEL_BUF_SIZE: usize = 5;
@@ -109,6 +103,8 @@ static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CH
     StaticCell::new();
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
+
+static EXTI_INPUT: OnceLock<blocking_mutex::Mutex<CriticalSectionRawMutex, RefCell<ExtiInput<'static, Blocking>>>> = OnceLock::new();
 
 // static paripherals
 static SPI: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
@@ -123,6 +119,19 @@ static C_TX_BUF: StaticCell<TxFdBuf<C_TX_BUF_SIZE>> = StaticCell::new();
 // Static uart buffer
 const S_RX_BUF_SIZE: usize = 256;
 static S_RX_BUF: StaticCell<[u8; S_RX_BUF_SIZE]> = StaticCell::new();
+
+/// IRQS for time ref update. Fires on every integer second with guaranteed < 1us accuracy
+/// (0.2us on average)
+#[interrupt]
+fn EXTI9_5() {
+    EXTI_INPUT.try_get().unwrap().lock(|p| p.borrow_mut().clear_pending());
+
+    let time_us = TIME_REF_UPD_SECOND.swap(0, Ordering::Acquire) * 1000 * 1000;
+    if time_us == 0 { return; }
+    
+    TIME_REF.store(time_us - Instant::now().as_micros(), Ordering::Release);
+}
+
 
 /// Watchdog petting task
 #[embassy_executor::task]
@@ -156,6 +165,8 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     config.rcc = get_rcc_config();
     let p = embassy_stm32::init(config);
+    
+    //let mut cp = cortex_m::Peripherals::take().unwrap();
 
     const FW_VERSION: &str = env!("FW_VERSION");
     const FW_HASH: &str = env!("FW_HASH");
@@ -210,7 +221,7 @@ async fn main(spawner: Spawner) {
     }; // => SPI Mode 0
 
     let spi = SPI.init(Mutex::new(Spi::new(
-        p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH2, spi_config,
+        p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH2, Irqs, spi_config,
     )));
 
     let cs1 = Output::new(p.PB0, Level::High, Speed::High);
@@ -228,7 +239,7 @@ async fn main(spawner: Spawner) {
     let mut config = usart::Config::default();
     config.baudrate = 57600;
     let (uart_tx, uart_rx) =
-        Uart::new(p.USART6, p.PC7, p.PC6, Irqs, p.DMA1_CH3, p.DMA1_CH4, config)
+        Uart::new(p.USART6, p.PC7, p.PC6, p.DMA1_CH3, p.DMA1_CH4, Irqs, config)
             .unwrap()
             .split();
 
@@ -251,6 +262,11 @@ async fn main(spawner: Spawner) {
     let liftoff = LiftoffPin(Output::new(p.PA0, Level::Low, Speed::Low));
     let phoenix = PhoenixService::new(driver, EmbassyClock, liftoff, startup);
 
+    // setup TIC irq
+    let mut tic_pin = ExtiInput::new_blocking(p.PD6, p.EXTI6, Pull::None, TriggerEdge::Rising);
+    tic_pin.enable_interrupt();
+    if let Err(_) = EXTI_INPUT.init(blocking_mutex::Mutex::new(RefCell::new(tic_pin))) { panic!() }
+
     // internal temperature sensor
     let mut dts_config = dts::Config::default();
     dts_config.sample_time = dts::SampleTime::ClockCycles15;
@@ -264,45 +280,45 @@ async fn main(spawner: Spawner) {
     let blue = Output::new(p.PD15, Level::Low, Speed::High);
 
     // -- Thread spawning
-    spawner.must_spawn(petter(watchdog));
-    spawner.must_spawn(dts_thread(tm_channel.dyn_sender(), dts_drv));
+    spawner.spawn(petter(watchdog).unwrap());
+    spawner.spawn(dts_thread(tm_channel.dyn_sender(), dts_drv).unwrap());
 
     Timer::after_millis(STARTUP_DELAY).await;
 
     // driver threads
-    spawner.must_spawn(sensor_threads::imu_thread(
+    spawner.spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
         imu1,
         yellow,
         &tm::imu1::Accel,
         &tm::imu1::Gyro,
-    ));
-    spawner.must_spawn(sensor_threads::imu_thread(
+    ).unwrap());
+    spawner.spawn(sensor_threads::imu_thread(
         tm_channel.dyn_sender(),
         imu2,
         red,
         &tm::imu2::Accel,
         &tm::imu2::Gyro,
-    ));
-    spawner.must_spawn(sensor_threads::baro_thread(
+    ).unwrap());
+    spawner.spawn(sensor_threads::baro_thread(
         tm_channel.dyn_sender(),
         baro,
         blue,
-    ));
-    spawner.must_spawn(sensor_threads::phoenix_thread(
+    ).unwrap());
+    spawner.spawn(sensor_threads::phoenix_thread(
         tm_channel.dyn_sender(),
         phoenix,
-    ));
+    ).unwrap());
 
     // tmtc io threads
-    spawner.must_spawn(io_threads::can_sender_thread(
+    spawner.spawn(io_threads::can_sender_thread(
         can_interface.writer(),
         tm_channel.dyn_receiver(),
-    ));
-    spawner.must_spawn(io_threads::can_receiver_thread(
+    ).unwrap());
+    spawner.spawn(io_threads::can_receiver_thread(
         can_interface.reader(),
         cmd_channel.dyn_sender(),
-    ));
+    ).unwrap());
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;

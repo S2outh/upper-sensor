@@ -6,7 +6,7 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{DynamicRec
 use embassy_time::Instant;
 use south_common::{
     definitions::internal_msgs,
-    chell::{ChellValue, match_value, fd_compat_chell_container},
+    chell::{ChellValue, match_value, fd_compat_chell_union},
     types::{Telecommand, Timesync},
 };
 
@@ -16,7 +16,7 @@ use crate::UpperSensorTMContainer;
 // Timesync stuff
 static TIMESYNC_REQUEST: Signal<ThreadModeRawMutex, u8> = Signal::new();
 const TIMESYNC_PRIORITY: u8 = 0;
-type TimesyncContainer = fd_compat_chell_container!(internal_msgs::TimesyncAnswer);
+type TimesyncContainer = fd_compat_chell_union!(internal_msgs::TimesyncAnswer);
 
 // tm sending task
 #[embassy_executor::task]
