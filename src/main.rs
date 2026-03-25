@@ -206,14 +206,14 @@ async fn main(spawner: Spawner) {
 
     // i2c/baro setup
     let mut cfg = i2c::Config::default();
-    cfg.frequency = khz(200);
+    cfg.frequency = khz(400);
     cfg.sda_pullup = true;
     cfg.scl_pullup = true;
     let baro = Baro::new(p.I2C1, p.PB8, p.PB9, Irqs, p.DMA1_CH1, p.DMA1_CH2, cfg);
 
     // spi/imu setup
     let mut spi_config = spi::Config::default();
-    spi_config.frequency = mhz(3);
+    spi_config.frequency = mhz(30);
     spi_config.gpio_speed = Speed::High;
     spi_config.mode = spi::Mode {
         polarity: spi::Polarity::IdleLow,            // CPOL=0
@@ -263,9 +263,9 @@ async fn main(spawner: Spawner) {
     let phoenix = PhoenixService::new(driver, EmbassyClock, liftoff, startup);
 
     // setup TIC irq
-    let mut tic_pin = ExtiInput::new_blocking(p.PD6, p.EXTI6, Pull::None, TriggerEdge::Rising);
-    tic_pin.enable_interrupt();
+    let tic_pin = ExtiInput::new_blocking(p.PD6, p.EXTI6, Pull::None, TriggerEdge::Rising);
     if let Err(_) = EXTI_INPUT.init(blocking_mutex::Mutex::new(RefCell::new(tic_pin))) { panic!() }
+    EXTI_INPUT.try_get().unwrap().lock(|p| p.borrow_mut().enable_interrupt());
 
     // internal temperature sensor
     let mut dts_config = dts::Config::default();
