@@ -12,6 +12,7 @@ use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 
 use phoenix::phoenix::{PhoenixEvent, PhoenixService};
+use rm3100::driver::RM3100;
 use south_common::{
     definitions::telemetry::upper_sensor as tm,
     chell::ChellDefinition,
@@ -52,6 +53,26 @@ pub async fn baro_thread(
 
 // imu polling task
 #[embassy_executor::task(pool_size = 2)]
+pub async fn mag_thread(
+    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    mut mag: RM3100<'static>,
+    mut led: Output<'static>,
+) {
+    loop {
+        match mag.read_data_when_ready_interrupt().await {
+            Ok(data) => {
+                let container = UpperSensorTMContainer::new(&tm::Magneto, &data).unwrap();
+                tm_sender.send(container).await;
+            }
+            Err(e) => error!("could not read magneto: {}", e),
+        }
+
+        led.toggle();
+    }
+}
+
+// imu polling task
+#[embassy_executor::task]
 pub async fn imu_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
     mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
@@ -100,7 +121,7 @@ pub async fn imu_thread(
                 //     Err(e) => error!("could not read temp: {}", e),
                 // }
             }
-            Err(e) => error!("could not read temp: {}", e),
+            Err(e) => error!("could not read imu: {}", e),
         }
 
         led.toggle();

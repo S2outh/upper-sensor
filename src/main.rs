@@ -14,7 +14,7 @@ use portable_atomic::AtomicU64;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{self, CanConfigurator, RxFdBuf, TxFdBuf}, dma, dts::{self, Dts}, exti::{self, ExtiInput, TriggerEdge}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::{self, typelevel::{EXTI4, EXTI15_10}}, mode::{Async, Blocking}, peripherals::{DMA1_CH1, DMA1_CH2, DMA1_CH3, DMA1_CH4, DMA2_CH2, DMA2_CH3, FDCAN1, FDCAN2, I2C1, IWDG1, USART6}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, usart::{self, Uart}, wdg::IndependentWatchdog
+    Config, bind_interrupts, can::{self, CanConfigurator, RxFdBuf, TxFdBuf}, dma, dts::{self, Dts}, exti::{self, ExtiInput, TriggerEdge}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::{self, typelevel::{EXTI4, EXTI15_10}}, mode::{Async, Blocking}, peripherals::{DMA1_CH1, DMA1_CH2, DMA1_CH3, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA2_CH2, DMA2_CH3, FDCAN1, FDCAN2, I2C1, IWDG1, USART6}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, usart::{self, Uart}, wdg::IndependentWatchdog
 };
 use embassy_sync::{
     blocking_mutex::{self, raw::{CriticalSectionRawMutex, ThreadModeRawMutex}},
@@ -28,8 +28,9 @@ use phoenix::{
     gps::{DataRateInterval, GpsDriver},
     phoenix::{OutputConfig, PhoenixService, StartupConfig, StartupMode},
 };
+use rm3100::driver::RM3100;
 use south_common::{
-    chell::{ChellDefinition, fd_compat_chell_union}, configs::can_config::CanPeriphConfig, definitions::{internal_msgs, telemetry::upper_sensor as tm}, types::Telecommand
+    chell::{ChellDefinition, fd_compat_chell_union}, configs::{can_config::CanPeriphConfig, mag_config}, definitions::{internal_msgs, telemetry::upper_sensor as tm}, types::Telecommand
 };
 use static_cell::StaticCell;
 
@@ -42,28 +43,38 @@ use {defmt_rtt as _, panic_probe as _};
 
 // bind interrupts
 bind_interrupts!(struct Irqs {
+    // CAN
     FDCAN1_IT0 => can::IT0InterruptHandler<FDCAN1>;
     FDCAN1_IT1 => can::IT1InterruptHandler<FDCAN1>;
 
     FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
     FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
 
+    // I2C Baro
     I2C1_EV => i2c::EventInterruptHandler<I2C1>;
     I2C1_ER => i2c::ErrorInterruptHandler<I2C1>;
     DMA1_STREAM1 => dma::InterruptHandler<DMA1_CH1>;
     DMA1_STREAM2 => dma::InterruptHandler<DMA1_CH2>;
 
+    // SPI IMU
     DMA2_STREAM2 => dma::InterruptHandler<DMA2_CH2>;
     DMA2_STREAM3 => dma::InterruptHandler<DMA2_CH3>;
 
-    DTS => dts::InterruptHandler;
-
+    // Interrupts IMU + Mag
     EXTI4 => exti::InterruptHandler<EXTI4>;
     EXTI15_10 => exti::InterruptHandler<EXTI15_10>;
 
-    USART6 => usart::InterruptHandler<USART6>;
+    // SPI Mag
     DMA1_STREAM3 => dma::InterruptHandler<DMA1_CH3>;
     DMA1_STREAM4 => dma::InterruptHandler<DMA1_CH4>;
+
+    // Temperature
+    DTS => dts::InterruptHandler;
+
+    // UART phoenix
+    USART6 => usart::InterruptHandler<USART6>;
+    DMA1_STREAM5 => dma::InterruptHandler<DMA1_CH5>;
+    DMA1_STREAM6 => dma::InterruptHandler<DMA1_CH6>;
 });
 
 /// config rcc
@@ -107,7 +118,8 @@ static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF
 static EXTI_INPUT: OnceLock<blocking_mutex::Mutex<CriticalSectionRawMutex, RefCell<ExtiInput<'static, Blocking>>>> = OnceLock::new();
 
 // static paripherals
-static SPI: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
+static SPI_IMU: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
+static SPI_MAG: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
 
 // can configuration
 const C_RX_BUF_SIZE: usize = 64;
@@ -215,12 +227,9 @@ async fn main(spawner: Spawner) {
     let mut spi_config = spi::Config::default();
     spi_config.frequency = mhz(30);
     spi_config.gpio_speed = Speed::High;
-    spi_config.mode = spi::Mode {
-        polarity: spi::Polarity::IdleLow,            // CPOL=0
-        phase: spi::Phase::CaptureOnFirstTransition, // CPHA=0
-    }; // => SPI Mode 0
+    spi_config.mode = spi::MODE_0;
 
-    let spi = SPI.init(Mutex::new(Spi::new(
+    let spi = SPI_IMU.init(Mutex::new(Spi::new(
         p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH2, Irqs, spi_config,
     )));
 
@@ -235,11 +244,27 @@ async fn main(spawner: Spawner) {
     let imu1 = Lsm6dsv32::new(spi, cs1, int1_1, int1_2).await;
     let imu2 = Lsm6dsv32::new(spi, cs2, int2_1, int2_2).await;
 
+    // spi/mag setup
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = khz(300);
+    spi_config.gpio_speed = Speed::High;
+    spi_config.mode = spi::MODE_0;
+    let spi = SPI_MAG.init(Mutex::new(Spi::new(
+        p.SPI2, p.PA9, p.PB15, p.PB14, p.DMA1_CH3, p.DMA1_CH4, Irqs, spi_config,
+    )));
+
+    let cs = Output::new(p.PA2, Level::High, Speed::High);
+    let int = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
+
+    let magneto_config = mag_config::get_mag_config();
+    
+    let magneto = RM3100::new(spi, cs, int, magneto_config).await;
+
     // uart/phoenix setup
     let mut config = usart::Config::default();
     config.baudrate = 57600;
     let (uart_tx, uart_rx) =
-        Uart::new(p.USART6, p.PC7, p.PC6, p.DMA1_CH3, p.DMA1_CH4, Irqs, config)
+        Uart::new(p.USART6, p.PC7, p.PC6, p.DMA1_CH5, p.DMA1_CH6, Irqs, config)
             .unwrap()
             .split();
 
@@ -274,7 +299,7 @@ async fn main(spawner: Spawner) {
     let dts_drv = DtsDrv::new(dts, dts_config.sample_time);
 
     // debug leds
-    // let mut green = Output::new(p.PD12, Level::Low, Speed::Medium);
+    let green = Output::new(p.PD12, Level::Low, Speed::Medium);
     let yellow = Output::new(p.PD13, Level::Low, Speed::High);
     let red = Output::new(p.PD14, Level::Low, Speed::High);
     let blue = Output::new(p.PD15, Level::Low, Speed::High);
@@ -304,6 +329,11 @@ async fn main(spawner: Spawner) {
         tm_channel.dyn_sender(),
         baro,
         blue,
+    ).unwrap());
+    spawner.spawn(sensor_threads::mag_thread(
+        tm_channel.dyn_sender(),
+        magneto,
+        green,
     ).unwrap());
     spawner.spawn(sensor_threads::phoenix_thread(
         tm_channel.dyn_sender(),
