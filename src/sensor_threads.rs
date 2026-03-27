@@ -51,8 +51,8 @@ pub async fn baro_thread(
     }
 }
 
-// imu polling task
-#[embassy_executor::task(pool_size = 2)]
+// mag polling task
+#[embassy_executor::task]
 pub async fn mag_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
     mut mag: RM3100<'static>,
@@ -72,7 +72,7 @@ pub async fn mag_thread(
 }
 
 // imu polling task
-#[embassy_executor::task]
+#[embassy_executor::task(pool_size = 2)]
 pub async fn imu_thread(
     tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
     mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
