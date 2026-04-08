@@ -5,7 +5,6 @@ use embassy_stm32::{
     peripherals::{DMA1_CH1, DMA1_CH2, I2C1, PB8, PB9},
     usart::{RingBufferedUartRx, UartTx},
 };
-use embassy_sync::channel::DynamicSender;
 use embassy_time::{Duration, Ticker};
 
 use hscmrnn030pa::driver::Baro;
@@ -14,20 +13,20 @@ use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6d
 use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use rm3100::driver::RM3100;
 use south_common::{
-    definitions::telemetry::upper_sensor as tm,
     chell::ChellDefinition,
+    definitions::telemetry::upper_sensor as tm,
     types::{Vector3i32, upper_sensor::AccelRaw},
 };
 
 use crate::{
-    Irqs, UpperSensorTMContainer,
+    Irqs, TMSender, UpperSensorTMContainer,
     embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin},
 };
 
 // baro polling task
 #[embassy_executor::task]
 pub async fn baro_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    tm_sender: TMSender,
     mut baro: Baro<'static, I2C1, PB8, PB9, Irqs, DMA1_CH1, DMA1_CH2>,
     mut led: Output<'static>,
 ) {
@@ -53,11 +52,7 @@ pub async fn baro_thread(
 
 // mag polling task
 #[embassy_executor::task]
-pub async fn mag_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut mag: RM3100<'static>,
-    mut led: Output<'static>,
-) {
+pub async fn mag_thread(tm_sender: TMSender, mut mag: RM3100<'static>, mut led: Output<'static>) {
     loop {
         match mag.read_data_when_ready_interrupt().await {
             Ok(data) => {
@@ -74,7 +69,7 @@ pub async fn mag_thread(
 // imu polling task
 #[embassy_executor::task(pool_size = 2)]
 pub async fn imu_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    tm_sender: TMSender,
     mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
     mut led: Output<'static>,
     accel_def: &'static dyn ChellDefinition,
@@ -84,6 +79,8 @@ pub async fn imu_thread(
 
     let mut imu = imu.enable_interrupt1();
     imu.commit_config().await;
+
+    let mut counter = 0;
 
     loop {
         match imu
@@ -96,19 +93,24 @@ pub async fn imu_thread(
             .await
         {
             Ok(_) => {
+                counter = (counter + 1) % 200;
                 match imu.read_accel_dual_raw().await {
                     Ok(data) => {
-                        let data: AccelRaw = data.into();
-                        let container = UpperSensorTMContainer::new(accel_def, &data).unwrap();
-                        tm_sender.send(container).await;
+                        if counter == 0 {
+                            let data: AccelRaw = data.into();
+                            let container = UpperSensorTMContainer::new(accel_def, &data).unwrap();
+                            tm_sender.send(container).await;
+                        }
                     }
                     Err(e) => error!("could not read accel: {}", e),
                 }
 
                 match imu.read_gyro_raw().await {
                     Ok(data) => {
-                        let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
-                        tm_sender.send(container).await;
+                        if counter == 0 {
+                            let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
+                            tm_sender.send(container).await;
+                        }
                     }
                     Err(e) => error!("could not read gyro: {}", e),
                 }
@@ -138,7 +140,7 @@ fn gps_to_unix_second_ceil(week: u16, ms_of_week: u64) -> u64 {
 // phoenix polling task
 #[embassy_executor::task]
 pub async fn phoenix_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
+    tm_sender: TMSender,
     mut phoenix: PhoenixService<
         RingBufferedUartRx<'static>,
         UartTx<'static, Async>,

@@ -1,17 +1,16 @@
 use defmt::error;
 use embassy_futures::select::{Either, select};
 use embassy_stm32::can::{BufferedFdCanReceiver, BufferedFdCanSender, frame::FdFrame};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{DynamicReceiver, DynamicSender}, signal::Signal};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 
 use embassy_time::Instant;
 use south_common::{
+    chell::{ChellValue, fd_compat_chell_union, match_value},
     definitions::internal_msgs,
-    chell::{ChellValue, match_value, fd_compat_chell_union},
     types::{Telecommand, Timesync},
 };
 
-use crate::UpperSensorTMContainer;
-
+use crate::{TCSender, TMReceiver};
 
 // Timesync stuff
 static TIMESYNC_REQUEST: Signal<ThreadModeRawMutex, u8> = Signal::new();
@@ -20,21 +19,20 @@ type TimesyncContainer = fd_compat_chell_union!(internal_msgs::TimesyncAnswer);
 
 // tm sending task
 #[embassy_executor::task]
-pub async fn can_sender_thread(
-    mut can_sender: BufferedFdCanSender,
-    tm_channel: DynamicReceiver<'static, UpperSensorTMContainer>,
-) {
+pub async fn can_sender_thread(mut can_sender: BufferedFdCanSender, tm_channel: TMReceiver) {
     loop {
         match select(tm_channel.receive(), TIMESYNC_REQUEST.wait()).await {
             // Sending telemetry
             Either::First(container) => {
                 let frame = FdFrame::new_standard(container.id(), container.fd_bytes()).unwrap();
                 can_sender.write(frame).await;
-            },
+            }
             // Sending Timesync answer
             Either::Second(request_id) => {
                 let diff = super::TIME_REF.load(core::sync::atomic::Ordering::Acquire);
-                if diff == 0 { continue }
+                if diff == 0 {
+                    continue;
+                }
                 let unix_time = diff + Instant::now().as_micros();
                 let priority = TIMESYNC_PRIORITY;
                 let msg = Timesync {
@@ -42,7 +40,8 @@ pub async fn can_sender_thread(
                     priority,
                     unix_time,
                 };
-                let container = TimesyncContainer::new(&internal_msgs::TimesyncAnswer, &msg).unwrap();
+                let container =
+                    TimesyncContainer::new(&internal_msgs::TimesyncAnswer, &msg).unwrap();
                 let frame = FdFrame::new_standard(container.id(), container.fd_bytes()).unwrap();
 
                 can_sender.write(frame).await;
@@ -53,10 +52,7 @@ pub async fn can_sender_thread(
 
 // tc receiving task
 #[embassy_executor::task]
-pub async fn can_receiver_thread(
-    can_receiver: BufferedFdCanReceiver,
-    tc_channel: DynamicSender<'static, Telecommand>,
-) {
+pub async fn can_receiver_thread(can_receiver: BufferedFdCanReceiver, tc_channel: TCSender) {
     loop {
         match can_receiver.receive().await {
             Ok(envelope) => {

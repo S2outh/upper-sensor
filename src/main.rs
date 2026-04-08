@@ -14,12 +14,36 @@ use portable_atomic::AtomicU64;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    Config, bind_interrupts, can::{self, CanConfigurator, RxFdBuf, TxFdBuf}, dma, dts::{self, Dts}, exti::{self, ExtiInput, TriggerEdge}, gpio::{Level, Output, Pull, Speed}, i2c, interrupt::{self, typelevel::{EXTI4, EXTI15_10}}, mode::{Async, Blocking}, peripherals::{DMA1_CH1, DMA1_CH2, DMA1_CH3, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA2_CH2, DMA2_CH3, FDCAN1, FDCAN2, I2C1, IWDG1, USART6}, rcc, spi::{self, Spi, mode::Master}, time::{khz, mhz}, usart::{self, Uart}, wdg::IndependentWatchdog
+    Config, bind_interrupts,
+    can::{self, CanConfigurator, RxFdBuf, TxFdBuf},
+    dma,
+    dts::{self, Dts},
+    exti::{self, ExtiInput, TriggerEdge},
+    gpio::{Level, Output, Pull, Speed},
+    i2c,
+    interrupt::{
+        self,
+        typelevel::{EXTI4, EXTI15_10},
+    },
+    mode::{Async, Blocking},
+    peripherals::{
+        DMA1_CH1, DMA1_CH2, DMA1_CH3, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA2_CH2, DMA2_CH3, FDCAN1,
+        FDCAN2, I2C1, IWDG1, USART6,
+    },
+    rcc,
+    spi::{self, Spi, mode::Master},
+    time::{khz, mhz},
+    usart::{self, Uart},
+    wdg::IndependentWatchdog,
 };
 use embassy_sync::{
-    blocking_mutex::{self, raw::{CriticalSectionRawMutex, ThreadModeRawMutex}},
-    channel::{Channel, DynamicSender},
-    mutex::Mutex, once_lock::OnceLock,
+    blocking_mutex::{
+        self,
+        raw::{CriticalSectionRawMutex, ThreadModeRawMutex},
+    },
+    channel::{Channel, Receiver, Sender},
+    mutex::Mutex,
+    once_lock::OnceLock,
 };
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
@@ -30,7 +54,10 @@ use phoenix::{
 };
 use rm3100::driver::RM3100;
 use south_common::{
-    chell::{ChellDefinition, fd_compat_chell_union}, configs::{can_config::CanPeriphConfig, mag_config}, definitions::{internal_msgs, telemetry::upper_sensor as tm}, types::Telecommand
+    chell::{ChellDefinition, fd_compat_chell_union},
+    configs::{can_config::CanPeriphConfig, mag_config},
+    definitions::{internal_msgs, telemetry::upper_sensor as tm},
+    types::Telecommand,
 };
 use static_cell::StaticCell;
 
@@ -81,17 +108,22 @@ bind_interrupts!(struct Irqs {
 fn get_rcc_config() -> rcc::Config {
     let mut rcc_config = rcc::Config::default();
     rcc_config.hsi = Some(rcc::HSIPrescaler::DIV1); // 64 MHz
-    rcc_config.sys = rcc::Sysclk::HSI; // cpu runns with 64 MHz
     rcc_config.pll1 = Some(rcc::Pll {
         source: rcc::PllSource::HSI,
-        prediv: rcc::PllPreDiv::DIV8,   // 8 MHz
-        mul: rcc::PllMul::MUL40,        // 320 MHz
-        divp: None,                     // 320 MHz
-        divq: Some(rcc::PllDiv::DIV10), // 32 MHz
-        divr: Some(rcc::PllDiv::DIV5),  // 64 MHz
+        prediv: rcc::PllPreDiv::DIV8,  // 8 MHz
+        mul: rcc::PllMul::MUL40,       // 320 MHz
+        divp: Some(rcc::PllDiv::DIV2), // 160 MHz
+        divq: Some(rcc::PllDiv::DIV2), // 160 MHz
+        divr: Some(rcc::PllDiv::DIV5), // 64 MHz
     });
-    rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q; // can runns with 32 MHz
-    rcc_config.voltage_scale = rcc::VoltageScale::Scale1;
+    rcc_config.sys = rcc::Sysclk::PLL1_P; // cpu runs with 160 MHz
+    rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q; // can runs with 160 MHz
+    rcc_config.voltage_scale = rcc::VoltageScale::Scale1; // voltage scale for max 225 MHz
+
+    rcc_config.apb1_pre = rcc::APBPrescaler::DIV2; // APB 1-4 all run with 80 MHz
+    rcc_config.apb2_pre = rcc::APBPrescaler::DIV2;
+    rcc_config.apb3_pre = rcc::APBPrescaler::DIV2;
+    rcc_config.apb4_pre = rcc::APBPrescaler::DIV2;
     rcc_config
 }
 
@@ -110,16 +142,28 @@ type UpperSensorTMContainer = fd_compat_chell_union!(tm);
 // static concurrency sync management types
 const TM_CHANNEL_BUF_SIZE: usize = 5;
 const CMD_CHANNEL_BUF_SIZE: usize = 5;
+
+type TMSender = Sender<'static, ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>;
+type TMReceiver =
+    Receiver<'static, ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>;
 static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
+
+type TCSender = Sender<'static, ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>;
+//type TCReceiver = Receiver<'static, ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>;
 static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
     StaticCell::new();
 
-static EXTI_INPUT: OnceLock<blocking_mutex::Mutex<CriticalSectionRawMutex, RefCell<ExtiInput<'static, Blocking>>>> = OnceLock::new();
+// Interrupt pin reference
+static EXTI_INPUT: OnceLock<
+    blocking_mutex::Mutex<CriticalSectionRawMutex, RefCell<ExtiInput<'static, Blocking>>>,
+> = OnceLock::new();
 
 // static paripherals
-static SPI_IMU: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
-static SPI_MAG: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> = StaticCell::new();
+static SPI_IMU: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> =
+    StaticCell::new();
+static SPI_MAG: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>>> =
+    StaticCell::new();
 
 // can configuration
 const C_RX_BUF_SIZE: usize = 64;
@@ -136,14 +180,18 @@ static S_RX_BUF: StaticCell<[u8; S_RX_BUF_SIZE]> = StaticCell::new();
 /// (0.2us on average)
 #[interrupt]
 fn EXTI9_5() {
-    EXTI_INPUT.try_get().unwrap().lock(|p| p.borrow_mut().clear_pending());
+    EXTI_INPUT
+        .try_get()
+        .unwrap()
+        .lock(|p| p.borrow_mut().clear_pending());
 
     let time_us = TIME_REF_UPD_SECOND.swap(0, Ordering::Acquire) * 1000 * 1000;
-    if time_us == 0 { return; }
-    
+    if time_us == 0 {
+        return;
+    }
+
     TIME_REF.store(time_us - Instant::now().as_micros(), Ordering::Release);
 }
-
 
 /// Watchdog petting task
 #[embassy_executor::task]
@@ -156,10 +204,7 @@ async fn petter(mut watchdog: IndependentWatchdog<'static, IWDG1>) {
 
 // internal temperature
 #[embassy_executor::task]
-pub async fn dts_thread(
-    tm_sender: DynamicSender<'static, UpperSensorTMContainer>,
-    mut dts: DtsDrv<'static>,
-) {
+pub async fn dts_thread(tm_sender: TMSender, mut dts: DtsDrv<'static>) {
     const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
     let mut ticker = Ticker::every(DTS_LOOP_LEN);
     loop {
@@ -177,8 +222,6 @@ async fn main(spawner: Spawner) {
     let mut config = Config::default();
     config.rcc = get_rcc_config();
     let p = embassy_stm32::init(config);
-    
-    //let mut cp = cortex_m::Peripherals::take().unwrap();
 
     const FW_VERSION: &str = env!("FW_VERSION");
     const FW_HASH: &str = env!("FW_HASH");
@@ -257,7 +300,7 @@ async fn main(spawner: Spawner) {
     let int = ExtiInput::new(p.PA12, p.EXTI12, Pull::Down, Irqs);
 
     let magneto_config = mag_config::get_mag_config();
-    
+
     let magneto = RM3100::new(spi, cs, int, magneto_config).await;
 
     // uart/phoenix setup
@@ -289,8 +332,13 @@ async fn main(spawner: Spawner) {
 
     // setup TIC irq
     let tic_pin = ExtiInput::new_blocking(p.PD6, p.EXTI6, Pull::None, TriggerEdge::Rising);
-    if let Err(_) = EXTI_INPUT.init(blocking_mutex::Mutex::new(RefCell::new(tic_pin))) { panic!() }
-    EXTI_INPUT.try_get().unwrap().lock(|p| p.borrow_mut().enable_interrupt());
+    if let Err(_) = EXTI_INPUT.init(blocking_mutex::Mutex::new(RefCell::new(tic_pin))) {
+        panic!()
+    }
+    EXTI_INPUT
+        .try_get()
+        .unwrap()
+        .lock(|p| p.borrow_mut().enable_interrupt());
 
     // internal temperature sensor
     let mut dts_config = dts::Config::default();
@@ -306,49 +354,42 @@ async fn main(spawner: Spawner) {
 
     // -- Thread spawning
     spawner.spawn(petter(watchdog).unwrap());
-    spawner.spawn(dts_thread(tm_channel.dyn_sender(), dts_drv).unwrap());
+    spawner.spawn(dts_thread(tm_channel.sender(), dts_drv).unwrap());
 
     Timer::after_millis(STARTUP_DELAY).await;
 
     // driver threads
-    spawner.spawn(sensor_threads::imu_thread(
-        tm_channel.dyn_sender(),
-        imu1,
-        yellow,
-        &tm::imu1::Accel,
-        &tm::imu1::Gyro,
-    ).unwrap());
-    spawner.spawn(sensor_threads::imu_thread(
-        tm_channel.dyn_sender(),
-        imu2,
-        red,
-        &tm::imu2::Accel,
-        &tm::imu2::Gyro,
-    ).unwrap());
-    spawner.spawn(sensor_threads::baro_thread(
-        tm_channel.dyn_sender(),
-        baro,
-        blue,
-    ).unwrap());
-    spawner.spawn(sensor_threads::mag_thread(
-        tm_channel.dyn_sender(),
-        magneto,
-        green,
-    ).unwrap());
-    spawner.spawn(sensor_threads::phoenix_thread(
-        tm_channel.dyn_sender(),
-        phoenix,
-    ).unwrap());
+    spawner.spawn(
+        sensor_threads::imu_thread(
+            tm_channel.sender(),
+            imu1,
+            yellow,
+            &tm::imu1::Accel,
+            &tm::imu1::Gyro,
+        )
+        .unwrap(),
+    );
+    spawner.spawn(
+        sensor_threads::imu_thread(
+            tm_channel.sender(),
+            imu2,
+            red,
+            &tm::imu2::Accel,
+            &tm::imu2::Gyro,
+        )
+        .unwrap(),
+    );
+    spawner.spawn(sensor_threads::baro_thread(tm_channel.sender(), baro, blue).unwrap());
+    spawner.spawn(sensor_threads::mag_thread(tm_channel.sender(), magneto, green).unwrap());
+    spawner.spawn(sensor_threads::phoenix_thread(tm_channel.sender(), phoenix).unwrap());
 
     // tmtc io threads
-    spawner.spawn(io_threads::can_sender_thread(
-        can_interface.writer(),
-        tm_channel.dyn_receiver(),
-    ).unwrap());
-    spawner.spawn(io_threads::can_receiver_thread(
-        can_interface.reader(),
-        cmd_channel.dyn_sender(),
-    ).unwrap());
+    spawner.spawn(
+        io_threads::can_sender_thread(can_interface.writer(), tm_channel.receiver()).unwrap(),
+    );
+    spawner.spawn(
+        io_threads::can_receiver_thread(can_interface.reader(), cmd_channel.sender()).unwrap(),
+    );
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;
