@@ -24,12 +24,14 @@ embedded-io-async = { version = "0.7.0" }
 embedded-can = "0.4.1"
 static_cell = { version = "2.1.1", features = ["nightly"] }
 
-south-common = { features = ["h7"], git = "ssh://git@github.com/S2outh/south-common.git" }
+south-common = { features = ["h7"], git = "https://git@github.com/S2outh/south-common.git" }
 
-lsm6dsv32 = { git = "ssh://git@github.com/S2outh/imu-driver.git", features = ["debug"] }
-rm3100 = { git = "ssh://git@github.com/S2outh/magneto-driver.git" }
-hscmrnn030pa = { git = "ssh://git@github.com/S2outh/baro-driver.git" }
+lsm6dsv32 = { git = "https://github.com/S2outh/imu-driver.git", features = ["debug"] }
+rm3100 = { git = "https://github.com/S2outh/magneto-driver.git" }
+hscmrnn030pa = { git = "https://github.com/S2outh/baro-driver.git" }
+
 phoenix = { git = "ssh://git@github.com/S2outh/phoenix-vibing.git", branch = "dev" }
+
 portable-atomic = "1.13.1"
 
 [profile.release]

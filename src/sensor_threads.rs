@@ -1,3 +1,5 @@
+mod helpers;
+
 use defmt::{Debug2Format, error, info, warn};
 use embassy_stm32::{
     gpio::Output,
@@ -15,13 +17,15 @@ use rm3100::driver::RM3100;
 use south_common::{
     chell::ChellDefinition,
     definitions::telemetry::upper_sensor as tm,
-    types::{Vector3i32, upper_sensor::AccelRaw},
+    types::{Vector3i32, upper_sensor::AccelRaw}, utils::Oversampeling,
 };
 
 use crate::{
     Irqs, TMSender, UpperSensorTMContainer,
     embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin},
 };
+
+use helpers::*;
 
 // baro polling task
 #[embassy_executor::task]
@@ -30,7 +34,8 @@ pub async fn baro_thread(
     mut baro: Baro<'static, I2C1, PB8, PB9, Irqs, DMA1_CH1, DMA1_CH2>,
     mut led: Output<'static>,
 ) {
-    const BARO_LOOP_LEN: Duration = Duration::from_millis(200);
+    // reading baro every 500 Millis (2Hz)
+    const BARO_LOOP_LEN: Duration = Duration::from_millis(500);
     let mut ticker = Ticker::every(BARO_LOOP_LEN);
     loop {
         match baro.read_out().await {
@@ -53,11 +58,17 @@ pub async fn baro_thread(
 // mag polling task
 #[embassy_executor::task]
 pub async fn mag_thread(tm_sender: TMSender, mut mag: RM3100<'static>, mut led: Output<'static>) {
+    // mag is configured for 18 Hz
+    // software oversampeling 9 values
+    // => 2 Hz
+    let mut mag_oversampeler = Oversampeling::new(9, MagOvsWrapper([0i64; 3]));
     loop {
         match mag.read_data_when_ready_interrupt().await {
             Ok(data) => {
-                let container = UpperSensorTMContainer::new(&tm::Magneto, &data).unwrap();
-                tm_sender.send(container).await;
+                if let Some(value) = mag_oversampeler.insert(data) {
+                    let container = UpperSensorTMContainer::new(&tm::Magneto, &value).unwrap();
+                    tm_sender.send(container).await;
+                }
             }
             Err(e) => error!("could not read magneto: {}", e),
         }
@@ -80,10 +91,14 @@ pub async fn imu_thread(
     let mut imu = imu.enable_interrupt1();
     imu.commit_config().await;
 
-    let mut counter = 0;
+    // Imu is configured for 1.92 KHz ODR
+    // (for now) software oversampeling 192 values
+    // => 10 Hz
+    let mut accel_oversampeler = Oversampeling::new(192, AccelOvsWrapper([[0i64; 3]; 2]));
+    let mut gyro_oversampeler = Oversampeling::new(192, GyroOvsWrapper([0i64; 3]));
 
     loop {
-        match imu
+        if let Err(e) = imu
             .wait_for_data_ready_interrupt1(
                 true,  // Accel
                 true,  // Gyro
@@ -92,39 +107,38 @@ pub async fn imu_thread(
             )
             .await
         {
-            Ok(_) => {
-                counter = (counter + 1) % 200;
-                match imu.read_accel_dual_raw().await {
-                    Ok(data) => {
-                        if counter == 0 {
-                            let data: AccelRaw = data.into();
-                            let container = UpperSensorTMContainer::new(accel_def, &data).unwrap();
-                            tm_sender.send(container).await;
-                        }
-                    }
-                    Err(e) => error!("could not read accel: {}", e),
-                }
-
-                match imu.read_gyro_raw().await {
-                    Ok(data) => {
-                        if counter == 0 {
-                            let container = UpperSensorTMContainer::new(gyro_def, &data).unwrap();
-                            tm_sender.send(container).await;
-                        }
-                    }
-                    Err(e) => error!("could not read gyro: {}", e),
-                }
-
-                // match imu.read_temp_raw().await {
-                //     Ok(data) => {
-                //         let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
-                //         tm_sender.send(container).await;
-                //     }
-                //     Err(e) => error!("could not read temp: {}", e),
-                // }
-            }
-            Err(e) => error!("could not read imu: {}", e),
+            error!("could not wait for imu: {}", e);
+            continue;
         }
+        
+        match imu.read_accel_dual_raw().await {
+            Ok(data) => {
+                if let Some(value) = accel_oversampeler.insert(data) {
+                    let value: AccelRaw = value.into();
+                    let container = UpperSensorTMContainer::new(accel_def, &value).unwrap();
+                    tm_sender.send(container).await;
+                }
+            }
+            Err(e) => error!("could not read accel: {}", e),
+        }
+
+        match imu.read_gyro_raw().await {
+            Ok(data) => {
+                if let Some(value) = gyro_oversampeler.insert(data) {
+                    let container = UpperSensorTMContainer::new(gyro_def, &value).unwrap();
+                    tm_sender.send(container).await;
+                }
+            }
+            Err(e) => error!("could not read gyro: {}", e),
+        }
+
+        // match imu.read_temp_raw().await {
+        //     Ok(data) => {
+        //         let container = UpperSensorTMContainer::new(temp_def, &data).unwrap();
+        //         tm_sender.send(container).await;
+        //     }
+        //     Err(e) => error!("could not read temp: {}", e),
+        // }
 
         led.toggle();
     }
