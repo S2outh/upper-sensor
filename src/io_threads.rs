@@ -13,7 +13,7 @@ use south_common::{
 use crate::{TCSender, TMReceiver};
 
 // Timesync stuff
-static TIMESYNC_REQUEST: Signal<ThreadModeRawMutex, u8> = Signal::new();
+static TIMESYNC_REQUEST: Signal<ThreadModeRawMutex, (u8, Instant)> = Signal::new();
 const TIMESYNC_PRIORITY: u8 = 0;
 type TimesyncContainer = fd_compat_chell_union!(internal_msgs::TimesyncAnswer);
 
@@ -28,17 +28,19 @@ pub async fn can_sender_thread(mut can_sender: BufferedFdCanSender, tm_channel: 
                 can_sender.write(frame).await;
             }
             // Sending Timesync answer
-            Either::Second(request_id) => {
+            Either::Second((request_id, local_instant_recv)) => {
                 let diff = super::TIME_REF.load(core::sync::atomic::Ordering::Acquire);
                 if diff == 0 {
                     continue;
                 }
-                let unix_time = diff + Instant::now().as_micros();
                 let priority = TIMESYNC_PRIORITY;
+                let unix_time_recv = diff + local_instant_recv.as_micros();
+                let unix_time_snd = diff + Instant::now().as_micros();
                 let msg = Timesync {
                     request_id,
                     priority,
-                    unix_time,
+                    unix_time_recv,
+                    unix_time_snd,
                 };
                 let container =
                     TimesyncContainer::new(&internal_msgs::TimesyncAnswer, &msg).unwrap();
@@ -66,7 +68,7 @@ pub async fn can_receiver_thread(can_receiver: BufferedFdCanReceiver, tc_channel
                         },
                         internal_msgs::TimesyncRequest => {
                             if let Some(request_id) = envelope.frame.data().get(0) {
-                                TIMESYNC_REQUEST.signal(*request_id);
+                                TIMESYNC_REQUEST.signal((*request_id, envelope.ts));
                             }
                         },
                     });
