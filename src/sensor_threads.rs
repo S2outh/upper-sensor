@@ -17,11 +17,12 @@ use rm3100::driver::RM3100;
 use south_common::{
     chell::ChellDefinition,
     definitions::telemetry::upper_sensor as tm,
-    types::{Vector3i32, upper_sensor::AccelRaw}, utils::Oversampeling,
+    types::{Vector3i32, upper_sensor::AccelRaw},
+    utils::Oversampeling,
 };
 
 use crate::{
-    Irqs, TMSender, UpperSensorTMContainer,
+    Irqs, UpperSensorChellUnion, UpperSensorTMSender,
     embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin},
 };
 
@@ -30,7 +31,7 @@ use helpers::*;
 // baro polling task
 #[embassy_executor::task]
 pub async fn baro_thread(
-    tm_sender: TMSender,
+    tm_sender: UpperSensorTMSender,
     mut baro: Baro<'static, I2C1, PB8, PB9, Irqs, DMA1_CH1, DMA1_CH2>,
     mut led: Output<'static>,
 ) {
@@ -42,7 +43,7 @@ pub async fn baro_thread(
             Ok(raw) => {
                 // let temp = raw.baro_temp_convert();
                 // let pressure = raw.baro_pressure_convert_pa();
-                let container = UpperSensorTMContainer::new(&tm::Baro, &raw.pressure_data).unwrap();
+                let container = UpperSensorChellUnion::new(&tm::Baro, &raw.pressure_data).unwrap();
                 tm_sender.send(container).await;
             }
             Err(e) => {
@@ -57,7 +58,11 @@ pub async fn baro_thread(
 
 // mag polling task
 #[embassy_executor::task]
-pub async fn mag_thread(tm_sender: TMSender, mut mag: RM3100<'static>, mut led: Output<'static>) {
+pub async fn mag_thread(
+    tm_sender: UpperSensorTMSender,
+    mut mag: RM3100<'static>,
+    mut led: Output<'static>,
+) {
     // mag is configured for 18 Hz
     // software oversampeling 9 values
     // => 2 Hz
@@ -66,7 +71,7 @@ pub async fn mag_thread(tm_sender: TMSender, mut mag: RM3100<'static>, mut led: 
         match mag.read_data_when_ready_interrupt().await {
             Ok(data) => {
                 if let Some(value) = mag_oversampeler.insert(data) {
-                    let container = UpperSensorTMContainer::new(&tm::Magneto, &value).unwrap();
+                    let container = UpperSensorChellUnion::new(&tm::Magneto, &value).unwrap();
                     tm_sender.send(container).await;
                 }
             }
@@ -80,7 +85,7 @@ pub async fn mag_thread(tm_sender: TMSender, mut mag: RM3100<'static>, mut led: 
 // imu polling task
 #[embassy_executor::task(pool_size = 2)]
 pub async fn imu_thread(
-    tm_sender: TMSender,
+    tm_sender: UpperSensorTMSender,
     mut imu: Lsm6dsv32<'static, FifoDisabled, Int1Disabled, Int2Disabled>,
     mut led: Output<'static>,
     accel_def: &'static dyn ChellDefinition,
@@ -110,12 +115,12 @@ pub async fn imu_thread(
             error!("could not wait for imu: {}", e);
             continue;
         }
-        
+
         match imu.read_accel_dual_raw().await {
             Ok(data) => {
                 if let Some(value) = accel_oversampeler.insert(data) {
                     let value: AccelRaw = value.into();
-                    let container = UpperSensorTMContainer::new(accel_def, &value).unwrap();
+                    let container = UpperSensorChellUnion::new(accel_def, &value).unwrap();
                     tm_sender.send(container).await;
                 }
             }
@@ -125,7 +130,7 @@ pub async fn imu_thread(
         match imu.read_gyro_raw().await {
             Ok(data) => {
                 if let Some(value) = gyro_oversampeler.insert(data) {
-                    let container = UpperSensorTMContainer::new(gyro_def, &value).unwrap();
+                    let container = UpperSensorChellUnion::new(gyro_def, &value).unwrap();
                     tm_sender.send(container).await;
                 }
             }
@@ -154,7 +159,7 @@ fn gps_to_unix_second_ceil(week: u16, ms_of_week: u64) -> u64 {
 // phoenix polling task
 #[embassy_executor::task]
 pub async fn phoenix_thread(
-    tm_sender: TMSender,
+    tm_sender: UpperSensorTMSender,
     mut phoenix: PhoenixService<
         RingBufferedUartRx<'static>,
         UartTx<'static, Async>,
@@ -202,14 +207,14 @@ pub async fn phoenix_thread(
 
                         let state = msg.navigation_status | (msg.tracked_satellites << 2);
 
-                        let container = UpperSensorTMContainer::new(&tm::gps::Pos, &ecef).unwrap();
+                        let container = UpperSensorChellUnion::new(&tm::gps::Pos, &ecef).unwrap();
                         tm_sender.send(container).await;
 
-                        let container = UpperSensorTMContainer::new(&tm::gps::Vel, &vel).unwrap();
+                        let container = UpperSensorChellUnion::new(&tm::gps::Vel, &vel).unwrap();
                         tm_sender.send(container).await;
 
                         let container =
-                            UpperSensorTMContainer::new(&tm::gps::Status, &state).unwrap();
+                            UpperSensorChellUnion::new(&tm::gps::Status, &state).unwrap();
                         tm_sender.send(container).await;
                     }
                     _ => (),

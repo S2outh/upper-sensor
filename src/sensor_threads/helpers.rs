@@ -1,4 +1,8 @@
-use core::{array::repeat, convert::Infallible, ops::{AddAssign, Div}};
+use core::{
+    array::repeat,
+    convert::Infallible,
+    ops::{AddAssign, Div},
+};
 
 #[derive(Clone)]
 pub struct AccelOvsWrapper(pub [[i64; 3]; 2]);

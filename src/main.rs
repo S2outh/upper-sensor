@@ -3,7 +3,6 @@
 
 mod dts_drv;
 mod embassy_adapter;
-mod io_threads;
 mod sensor_threads;
 
 use core::{cell::RefCell, sync::atomic::Ordering};
@@ -41,11 +40,10 @@ use embassy_sync::{
         self,
         raw::{CriticalSectionRawMutex, ThreadModeRawMutex},
     },
-    channel::{Channel, Receiver, Sender},
     mutex::Mutex,
     once_lock::OnceLock,
 };
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
 use phoenix::{
@@ -54,10 +52,11 @@ use phoenix::{
 };
 use rm3100::driver::RM3100;
 use south_common::{
-    chell::{ChellDefinition, fd_compat_chell_union},
+    chell::ChellDefinition,
     configs::{can_config::CanPeriphConfig, mag_config},
     definitions::{internal_msgs, telemetry::upper_sensor as tm},
-    types::Telecommand,
+    gen_obdh_types,
+    obdh::EmptyFunc,
 };
 use static_cell::StaticCell;
 
@@ -133,26 +132,15 @@ const STARTUP_DELAY: u64 = 300;
 const WATCHDOG_TIMEOUT_US: u32 = 300_000;
 const WATCHDOG_PETTING_INTERVAL_US: u32 = WATCHDOG_TIMEOUT_US / 2;
 
-static TIME_REF: AtomicU64 = AtomicU64::new(0);
+// Time ref upd stuff
 static TIME_REF_UPD_SECOND: AtomicU64 = AtomicU64::new(0);
+const GPS_TIME_SRC_UPDATE_PRIO: u8 = 0;
 
 // TM container
-type UpperSensorTMContainer = fd_compat_chell_union!(tm);
+gen_obdh_types!(UpperSensor, tm);
 
-// static concurrency sync management types
-const TM_CHANNEL_BUF_SIZE: usize = 5;
-const CMD_CHANNEL_BUF_SIZE: usize = 5;
-
-type TMSender = Sender<'static, ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>;
-type TMReceiver =
-    Receiver<'static, ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>;
-static TMC: StaticCell<Channel<ThreadModeRawMutex, UpperSensorTMContainer, TM_CHANNEL_BUF_SIZE>> =
-    StaticCell::new();
-
-type TCSender = Sender<'static, ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>;
-//type TCReceiver = Receiver<'static, ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>;
-static CMDC: StaticCell<Channel<ThreadModeRawMutex, Telecommand, CMD_CHANNEL_BUF_SIZE>> =
-    StaticCell::new();
+// internal messaging channels
+static COM_CHANNELS: UpperSensorComChannels = UpperSensorComChannels::new(4);
 
 // Interrupt pin reference
 static EXTI_INPUT: OnceLock<
@@ -190,7 +178,7 @@ fn EXTI9_5() {
         return;
     }
 
-    TIME_REF.store(time_us - Instant::now().as_micros(), Ordering::Release);
+    COM_CHANNELS.set_utc_us(time_us, GPS_TIME_SRC_UPDATE_PRIO);
 }
 
 /// Watchdog petting task
@@ -202,14 +190,24 @@ async fn petter(mut watchdog: IndependentWatchdog<'static, IWDG1>) {
     }
 }
 
+#[embassy_executor::task]
+pub async fn can_receiver_task(mut can_receiver: UpperSensorCanReceiver) -> ! {
+    can_receiver.run().await
+}
+
+#[embassy_executor::task]
+pub async fn can_sender_task(mut can_sender: UpperSensorCanSender) -> ! {
+    can_sender.run().await
+}
+
 // internal temperature
 #[embassy_executor::task]
-pub async fn dts_thread(tm_sender: TMSender, mut dts: DtsDrv<'static>) {
+pub async fn dts_thread(tm_sender: UpperSensorTMSender, mut dts: DtsDrv<'static>) {
     const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
     let mut ticker = Ticker::every(DTS_LOOP_LEN);
     loop {
         let temp = dts.read_tenth_deg().await;
-        let container = UpperSensorTMContainer::new(&tm::InternalTemperature, &temp).unwrap();
+        let container = UpperSensorChellUnion::new(&tm::InternalTemperature, &temp).unwrap();
         tm_sender.send(container).await;
 
         ticker.next().await;
@@ -232,10 +230,6 @@ async fn main(spawner: Spawner) {
     let mut watchdog = IndependentWatchdog::new(p.IWDG1, WATCHDOG_TIMEOUT_US);
     watchdog.unleash();
 
-    // TM channel setup
-    let tm_channel = TMC.init(Channel::new());
-    let cmd_channel = CMDC.init(Channel::new());
-
     // -- CAN configuration
     // can 1 configuration
     let mut can_configurator =
@@ -254,10 +248,15 @@ async fn main(spawner: Spawner) {
         .add_receive_topic(internal_msgs::TimesyncRequest.id())
         .unwrap();
 
-    let can_interface = can_configurator.activate(
+    let can_instance = can_configurator.activate(
         C_TX_BUF.init(TxFdBuf::<C_TX_BUF_SIZE>::new()),
         C_RX_BUF.init(RxFdBuf::<C_RX_BUF_SIZE>::new()),
     );
+
+    // Setup can sender and receiver runners
+    let can_receiver = UpperSensorCanReceiver::new(can_instance.reader(), &COM_CHANNELS, EmptyFunc);
+
+    let can_sender = UpperSensorCanSender::new(can_instance.writer(), &COM_CHANNELS);
 
     // i2c/baro setup
     let mut cfg = i2c::Config::default();
@@ -354,14 +353,14 @@ async fn main(spawner: Spawner) {
 
     // -- Thread spawning
     spawner.spawn(petter(watchdog).unwrap());
-    spawner.spawn(dts_thread(tm_channel.sender(), dts_drv).unwrap());
+    spawner.spawn(dts_thread(COM_CHANNELS.get_tm_sender(), dts_drv).unwrap());
 
     Timer::after_millis(STARTUP_DELAY).await;
 
     // driver threads
     spawner.spawn(
         sensor_threads::imu_thread(
-            tm_channel.sender(),
+            COM_CHANNELS.get_tm_sender(),
             imu1,
             yellow,
             &tm::imu1::Accel,
@@ -371,7 +370,7 @@ async fn main(spawner: Spawner) {
     );
     spawner.spawn(
         sensor_threads::imu_thread(
-            tm_channel.sender(),
+            COM_CHANNELS.get_tm_sender(),
             imu2,
             red,
             &tm::imu2::Accel,
@@ -379,17 +378,13 @@ async fn main(spawner: Spawner) {
         )
         .unwrap(),
     );
-    spawner.spawn(sensor_threads::baro_thread(tm_channel.sender(), baro, blue).unwrap());
-    spawner.spawn(sensor_threads::mag_thread(tm_channel.sender(), magneto, green).unwrap());
-    spawner.spawn(sensor_threads::phoenix_thread(tm_channel.sender(), phoenix).unwrap());
+    spawner.spawn(sensor_threads::baro_thread(COM_CHANNELS.get_tm_sender(), baro, blue).unwrap());
+    spawner
+        .spawn(sensor_threads::mag_thread(COM_CHANNELS.get_tm_sender(), magneto, green).unwrap());
+    spawner.spawn(sensor_threads::phoenix_thread(COM_CHANNELS.get_tm_sender(), phoenix).unwrap());
 
-    // tmtc io threads
-    spawner.spawn(
-        io_threads::can_sender_thread(can_interface.writer(), tm_channel.receiver()).unwrap(),
-    );
-    spawner.spawn(
-        io_threads::can_receiver_thread(can_interface.reader(), cmd_channel.sender()).unwrap(),
-    );
+    spawner.spawn(can_sender_task(can_sender).unwrap());
+    spawner.spawn(can_receiver_task(can_receiver).unwrap());
 
     // wait until all other threads finished (never)
     core::future::pending::<()>().await;
