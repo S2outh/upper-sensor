@@ -52,6 +52,7 @@
             # extra cargo tools
             cargo-edit
             cargo-expand
+            cargo-show-asm
 
             # for flashing
             probe-rs-tools
