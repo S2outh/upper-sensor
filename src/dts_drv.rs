@@ -32,7 +32,7 @@ impl<'d> DtsDrv<'d> {
     }
     pub async fn read_tenth_deg(&mut self) -> i16 {
         let raw_temp = self.dts.read().await;
-        let celcius = self.convert_to_celsius(raw_temp);
-        (celcius * 10.) as i16
+        let celsius = self.convert_to_celsius(raw_temp);
+        (celsius * 10.) as i16
     }
 }
