@@ -3,8 +3,8 @@
 
 mod dts_drv;
 mod embassy_adapter;
+mod sensor_fusion;
 mod sensor_threads;
-
 use core::{cell::RefCell, sync::atomic::Ordering};
 
 use cortex_m_rt::interrupt;
@@ -119,7 +119,7 @@ fn get_rcc_config() -> rcc::Config {
     rcc_config.mux.fdcansel = rcc::mux::Fdcansel::PLL1_Q; // can runns with 120 MHz
     rcc_config.voltage_scale = rcc::VoltageScale::Scale2; // voltage scale for max 300 MHz Pll out
 
-    rcc_config.ahb_pre = rcc::AHBPrescaler::DIV2;  // AHB runns at 120 MHz
+    rcc_config.ahb_pre = rcc::AHBPrescaler::DIV2; // AHB runns at 120 MHz
     rcc_config.apb1_pre = rcc::APBPrescaler::DIV4; // APB 1-4 all run with 60 MHz
     rcc_config.apb2_pre = rcc::APBPrescaler::DIV4;
     rcc_config.apb3_pre = rcc::APBPrescaler::DIV4;
