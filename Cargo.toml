@@ -34,5 +34,13 @@ phoenix = { git = "ssh://git@github.com/S2outh/phoenix-vibing.git", branch = "de
 
 portable-atomic = "1.13.1"
 
+[profile.dev]
+opt-level = 3
+debug = 2
+debug-assertions = false
+lto = true
+codegen-units = 16
+
 [profile.release]
+lto = true
 debug = 2
