@@ -35,6 +35,14 @@ portable-atomic = "1.13.1"
 libm = "0.2.16"
 nalgebra = { version = "0.35.0", default-features = false, features = ["libm"] }
 
+[profile.dev]
+opt-level = 3
+debug = 2
+debug-assertions = false
+lto = true
+codegen-units = 16
+
 [profile.release]
+lto = true
 debug = 2
 
