@@ -2,7 +2,9 @@
 #![no_main]
 use core::f32;
 use libm::{atan2, cos, fabsf, powf, sin, sincos, sqrt, sqrtf};
-use nalgebra::{Matrix3, Matrix4, Quaternion, SMatrix, SVector, UnitQuaternion, Vector3};
+use nalgebra::{
+    Matrix3, Matrix4, Quaternion, Rotation3, SMatrix, SVector, UnitQuaternion, Vector3,
+};
 
 pub struct FlightData {
     pub accel_x_1: f64,
@@ -39,7 +41,7 @@ pub struct RocketEKF {
     pub baro_needs_sync: bool,
 }
 
-pub struct FlightManger {
+pub struct FlightManager {
     pub rocket_started: bool,
     pub ascent_flag: bool,
     pub calibration_active: bool,
@@ -47,9 +49,15 @@ pub struct FlightManger {
     pub calibration_count: usize,
     pub last_valid_gps: usize,
 
-    // ring buffer for low pass
-    pub accel_gyro_window: FixedVec<[f64; 6], WINDOW_SIZE>,
-    pub altitude_window: FixedVec<f64, WINDOW_SIZE>,
+    pub z_prev: Option<SVector<f64, 10>>,
+
+    pub accel_gyro_buffer: [[f64; 6]; 20],
+    pub accel_gyro_head: usize,
+    pub accel_gyro_len: usize,
+
+    pub altitude_buffer: [f64; 200],
+    pub altitude_head: usize,
+    pub altitude_len: usize,
 }
 
 pub fn pres_to_alt(pres: f32) -> f32 {
@@ -132,23 +140,20 @@ pub fn compute_d_rotation_d_quaternion(q: &[f64; 4]) -> [Matrix3<f64>; 4] {
     [dr_dw, dr_dx, dr_dy, dr_dz]
 }
 
-pub fn latlonh_to_ecef(lat_deg: f64, lon_deg: f64, h_m: f64) -> [f64; 3] {
-    // WGS84 consts
-    let a: f64 = 6_378_137.0;
-    let e_sq: f64 = 0.00669437999014;
+pub fn normalize_quaternion(quaternion: [f64; 4]) -> [f64; 4] {
+    let norm = sqrt(
+        quaternion[0] * quaternion[0]
+            + quaternion[1] * quaternion[1]
+            + quaternion[2] * quaternion[2]
+            + quaternion[3] * quaternion[3],
+    );
 
-    let lat = lat_deg.to_radians();
-    let lon = lon_deg.to_radians();
-
-    let (sin_lat, cos_lat) = sincos(lat);
-    let (sin_lon, cos_lon) = sincos(lon);
-
-    let n = a / sqrt(1.0 - e_sq * sin_lat * sin_lat);
-    let x = (n + h_m) * cos_lat * cos_lon;
-    let y = (n + h_m) * cos_lat * sin_lon;
-    let z = (n * (1.0 - e_sq) + h_m) * sin_lat;
-
-    [x, y, z]
+    [
+        quaternion[0] / norm,
+        quaternion[1] / norm,
+        quaternion[2] / norm,
+        quaternion[3] / norm,
+    ]
 }
 
 pub fn latlonh_to_ecef(lat_deg: f64, lon_deg: f64, h_m: f64) -> [f64; 3] {
