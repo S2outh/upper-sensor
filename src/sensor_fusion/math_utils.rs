@@ -217,18 +217,6 @@ pub fn ecef_to_ned_matrix(lat_deg: f64, lon_deg: f64) -> Matrix3<f64> {
     )
 }
 
-//pub fn quaternion_from_vectors(v1_in: [f64; 3], v2_in: [f64; 3]) -> [f64; 4] {
-  //  let v1 = Vector3::new(v1_in[0], v1_in[1], v1_in[2]);
-    //let v2 = Vector3::new(v2_in[0], v2_in[1], v2_in[2]);
-    //let unit_quat = UnitQuaternion::rotation_between(&v1, &v2).unwrap_or_default();
-
-    //[
-      //  unit_quat.coords[3], // w (Realteil)
-       // unit_quat.coords[0], // x
-       // unit_quat.coords[1], // y
-    //]
-//}
-
 pub fn state_transition(state: &SVector<f64, 23>, dt: f64) -> SVector<f64, 23> {
     let mut next_state = *state;
 

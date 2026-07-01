@@ -292,7 +292,6 @@ impl FlightManager {
 
         let mut mean_measurement = [0.0; 6];
         if self.accel_gyro_len > 0 {
-            // Wir iterieren nur über die Anzahl der tatsächlich befüllten Plätze
             for i in 0..self.accel_gyro_len {
                 for j in 0..6 {
                     mean_measurement[j] += self.accel_gyro_buffer[i][j];
@@ -331,7 +330,7 @@ impl FlightManager {
             let mean_alt = self.mean_altitude();
 
             if self.ascent_flag && (ekf.state[2] * 1.05 < mean_alt) {
-                self.ascent_flag = false; // Die Rakete fällt, Apogäum erreicht!
+                self.ascent_flag = false; 
             }
         }
 
