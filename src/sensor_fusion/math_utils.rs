@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 use core::f32;
-use libm::{atan2, cos, fabsf, powf, sin, sincos, sqrt, sqrtf};
+use libm::{cos, powf, sin, sincos, sqrt};
 use nalgebra::{
     Matrix3, Matrix4, Quaternion, Rotation3, SMatrix, SVector, UnitQuaternion, Vector3,
 };
@@ -59,6 +59,15 @@ pub struct FlightManager {
     pub altitude_head: usize,
     pub altitude_len: usize,
 }
+
+pub struct NedConvert{
+   pub x_ref: f64, 
+    pub y_ref: f64, 
+    pub z_ref: f64, 
+    pub lat_ref: f64, 
+    pub lon_ref: f64
+}
+
 
 pub fn pres_to_alt(pres: f32) -> f32 {
     44_330.0 * (1.0 - powf(pres / 104_315.0, 1.0 / 5.255)) //HyEnD
@@ -175,6 +184,16 @@ pub fn latlonh_to_ecef(lat_deg: f64, lon_deg: f64, h_m: f64) -> [f64; 3] {
     [x, y, z]
 }
 
+pub fn ecef_to_ned(x: f64, y: f64, z: f64, ned_convert: &NedConvert) -> [f64; 3]{
+    let ecef_ref = Vector3::new(ned_convert.x_ref, ned_convert.y_ref, ned_convert.z_ref);
+    let ecef_current = Vector3::new(x, y, z);
+    let delta_ecef = ecef_current - ecef_ref;
+    let rotation_matrix = ecef_to_ned_matrix(ned_convert.lat_ref, ned_convert.lon_ref);
+    let ned = rotation_matrix * delta_ecef;
+
+    [ned.x, ned.y, ned.z]
+}
+
 pub fn ecef_to_ned_matrix(lat_deg: f64, lon_deg: f64) -> Matrix3<f64> {
     let lat = lat_deg.to_radians();
     let lon = lon_deg.to_radians();
@@ -198,18 +217,17 @@ pub fn ecef_to_ned_matrix(lat_deg: f64, lon_deg: f64) -> Matrix3<f64> {
     )
 }
 
-pub fn quaternion_from_vectors(v1_in: [f64; 3], v2_in: [f64; 3]) -> [f64; 4] {
-    let v1 = Vector3::new(v1_in[0], v1_in[1], v1_in[2]);
-    let v2 = Vector3::new(v2_in[0], v2_in[1], v2_in[2]);
-    let unit_quat = UnitQuaternion::rotation_between(&v1, &v2).unwrap_or_default();
+//pub fn quaternion_from_vectors(v1_in: [f64; 3], v2_in: [f64; 3]) -> [f64; 4] {
+  //  let v1 = Vector3::new(v1_in[0], v1_in[1], v1_in[2]);
+    //let v2 = Vector3::new(v2_in[0], v2_in[1], v2_in[2]);
+    //let unit_quat = UnitQuaternion::rotation_between(&v1, &v2).unwrap_or_default();
 
-    [
-        unit_quat.coords[3], // w (Realteil)
-        unit_quat.coords[0], // x
-        unit_quat.coords[1], // y
-        unit_quat.coords[2], // z
-    ]
-}
+    //[
+      //  unit_quat.coords[3], // w (Realteil)
+       // unit_quat.coords[0], // x
+       // unit_quat.coords[1], // y
+    //]
+//}
 
 pub fn state_transition(state: &SVector<f64, 23>, dt: f64) -> SVector<f64, 23> {
     let mut next_state = *state;

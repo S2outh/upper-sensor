@@ -2,12 +2,12 @@
 #![no_main]
 
 use crate::sensor_fusion::math_utils::{
-    FlightData, FlightManager, RocketEKF, measurement_function,
+    FlightData, FlightManager, RocketEKF, NedConvert, measurement_function,
     measurement_jacobian, normalize_quaternion, state_transition, state_transition_jacobian,
 };
-use nalgebra::{ComplexField, SMatrix, SVector, UnitQuaternion, Vector3};
+use nalgebra::{SMatrix, SVector, UnitQuaternion, Vector3, ComplexField};
 
-pub fn init_ekf(data: &mut FlightData) -> RocketEKF {
+pub fn init_ekf(data: &mut FlightData) -> ( NedConvert, RocketEKF) {
     let g_ned = Vector3::new(0.0, 0.0, 9.8);
     let g_body = Vector3::new(data.accel_x_1, data.accel_y_1, data.accel_z_1);
     let g_ned_norm = g_ned.normalize();
@@ -47,8 +47,11 @@ pub fn init_ekf(data: &mut FlightData) -> RocketEKF {
     r[(1, 1)] = 0.01;
     r[(2, 2)] = 0.01;
     r[(9, 9)] = 10_000.0;
-
-    RocketEKF::new(x, p, q, r)
+    
+    (
+        NedConvert{x_ref: data.x, y_ref: data.y, z_ref: data.z, lat_ref: data.lat, lon_ref: data.lon},
+        RocketEKF::new(x, p, q, r)
+    )
 }
 
 impl RocketEKF {
@@ -130,7 +133,6 @@ impl RocketEKF {
             }
         }
 
-        // 4. GPS Hard Reset Logik (Wenn Sensor an Index 2 aktiv ist)
         if mask[2] {
             let h_innovation = innovation[2];
 
