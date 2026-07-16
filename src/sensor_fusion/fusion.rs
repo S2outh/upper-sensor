@@ -33,16 +33,16 @@ pub struct FlightData {
     pub pressure: f64,
 }
 
-pub struct RocketEKF {
-    pub state: SVector<f64, 23>,
-    pub p: SMatrix<f64, 23, 23>,
-    pub q: SMatrix<f64, 23, 23>,
-    pub r: SMatrix<f64, 10, 10>,
-    pub baro_needs_sync: bool,
+struct RocketEKF {
+    state: SVector<f64, 23>,
+    p: SMatrix<f64, 23, 23>,
+    q: SMatrix<f64, 23, 23>,
+    r: SMatrix<f64, 10, 10>,
+    baro_needs_sync: bool,
 }
 
 impl RocketEKF {
-    pub fn new(data: &mut FlightData) -> (NedConvert, Self) {
+    fn new(data: FlightData) -> (NedConvert, Self) {
         let g_ned = Vector3::new(0.0, 0.0, 9.8);
         let g_body = Vector3::new(data.accel_x_1, data.accel_y_1, data.accel_z_1);
         let g_ned_norm = g_ned.normalize();
@@ -224,42 +224,48 @@ impl RocketEKF {
     }
 }
 
-pub struct FlightManager {
-    pub rocket_started: bool,
-    pub ascent_flag: bool,
-    pub calibration_active: bool,
-    pub calibration_start_time: f64,
-    pub calibration_count: usize,
-    pub last_valid_gps: usize,
+struct FlightManager {
+    rocket_ekf: RocketEKF, 
+    rocket_started: bool,
+    ascent_flag: bool,
+    calibration_active: bool,
+    calibration_start_time: f64,
+    calibration_count: usize,
+    last_valid_gps: usize,
 
-    pub z_prev: Option<SVector<f64, 10>>,
+    z_prev: Option<SVector<f64, 10>>,
 
-    pub accel_gyro_buffer: [[f64; 6]; 20],
-    pub accel_gyro_head: usize,
-    pub accel_gyro_len: usize,
+    accel_gyro_buffer: [[f64; 6]; 20],
+    accel_gyro_head: usize,
+    accel_gyro_len: usize,
 
-    pub altitude_buffer: [f64; 200],
-    pub altitude_head: usize,
-    pub altitude_len: usize,
+    altitude_buffer: [f64; 200],
+    altitude_head: usize,
+    altitude_len: usize,
 }
 
 impl FlightManager {
-    pub fn new() -> Self {
-        Self {
-            rocket_started: false,
-            ascent_flag: true,
-            calibration_active: true,
-            calibration_start_time: 0.0,
-            calibration_count: 0,
-            last_valid_gps: 0,
-            z_prev: None,
-            accel_gyro_buffer: [[0.0; 6]; 20],
-            accel_gyro_head: 0,
-            accel_gyro_len: 0,
-            altitude_buffer: [0.0; 200],
-            altitude_head: 0,
-            altitude_len: 0,
-        }
+    pub fn new(data: FlightData) -> (NedConvert, Self) {
+        let (ned_convert, rocket_ekf) = RocketEKF::new(data);
+        (
+            ned_convert,
+            Self {
+                rocket_ekf,
+                rocket_started: false,
+                ascent_flag: true,
+                calibration_active: true,
+                calibration_start_time: 0.0,
+                calibration_count: 0,
+                last_valid_gps: 0,
+                z_prev: None,
+                accel_gyro_buffer: [[0.0; 6]; 20],
+                accel_gyro_head: 0,
+                accel_gyro_len: 0,
+                altitude_buffer: [0.0; 200],
+                altitude_head: 0,
+                altitude_len: 0,
+            },
+        )
     }
 
     // Help function: Add Number to IMU ring buffer
@@ -306,20 +312,11 @@ impl FlightManager {
     }
     pub fn run_ekf_on_flightdata(
         &mut self,
-        data: &mut FlightData,
+        data: FlightData,
         current_time: f64,
         dt: f64,
         start_pressure: f64,
-        ekf: &mut RocketEKF,
     ) {
-        data.roll_1 = data.roll_1.to_radians();
-        data.pitch_1 = data.pitch_1.to_radians();
-        data.yaw_1 = data.yaw_1.to_radians();
-
-        data.roll_2 = data.roll_2.to_radians();
-        data.pitch_2 = data.pitch_2.to_radians();
-        data.yaw_2 = data.yaw_2.to_radians();
-
         let cur_accel = [
             (data.accel_x_1 + data.accel_x_2) as f64 / 2.0,
             (data.accel_y_1 + data.accel_y_2) as f64 / 2.0,
@@ -357,7 +354,7 @@ impl FlightManager {
         if self.calibration_active && (current_time - self.calibration_start_time <= CALIB_TIME) {
             // 5s Dauer
             self.calibration_count += 1;
-            ekf.q
+            self.rocket_ekf.q
                 .fixed_view_mut::<4, 4>(12, 12)
                 .copy_from(&(SMatrix::<f64, 4, 4>::identity() * 1e-9));
             for j in 3..6 {
@@ -376,18 +373,18 @@ impl FlightManager {
         }
 
         if self.rocket_started {
-            self.push_altitude(ekf.state[2]);
+            self.push_altitude(self.rocket_ekf.state[2]);
 
             let mean_alt = self.mean_altitude();
 
-            if self.ascent_flag && (ekf.state[2] * 1.05 < mean_alt) {
+            if self.ascent_flag && (self.rocket_ekf.state[2] * 1.05 < mean_alt) {
                 self.ascent_flag = false;
             }
         }
 
         // predict
         if dt > 0.0 {
-            ekf.predict(dt);
+            self.rocket_ekf.predict(dt);
         }
 
         let mut z_measured = SVector::<f64, 10>::zeros();
@@ -415,6 +412,6 @@ impl FlightManager {
                 mask[9] = false;
             }
         }
-        ekf.update(&z_measured, &mask);
+        self.rocket_ekf.update(&z_measured, &mask);
     }
 }
