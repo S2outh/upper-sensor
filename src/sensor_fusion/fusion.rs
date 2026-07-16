@@ -1,76 +1,108 @@
-#![no_std]
-#![no_main]
-
 use crate::sensor_fusion::math_utils::{
-    FlightData, FlightManager, RocketEKF, NedConvert, measurement_function,
-    measurement_jacobian, normalize_quaternion, state_transition, state_transition_jacobian,
+    NedConvert, measurement_function, measurement_jacobian,
+    normalize_quaternion, state_transition, state_transition_jacobian,
 };
-use nalgebra::{SMatrix, SVector, UnitQuaternion, Vector3, ComplexField};
+use nalgebra::{ComplexField, SMatrix, SVector, UnitQuaternion, Vector3};
 
-pub fn init_ekf(data: &mut FlightData) -> ( NedConvert, RocketEKF) {
-    let g_ned = Vector3::new(0.0, 0.0, 9.8);
-    let g_body = Vector3::new(data.accel_x_1, data.accel_y_1, data.accel_z_1);
-    let g_ned_norm = g_ned.normalize();
-    let g_body_norm = g_body.normalize();
+const CALIB_TIME: f64 = 5.;
 
-    // Quaternion x, y, z, w
-    let q_i2b = UnitQuaternion::rotation_between(&g_ned_norm, &g_body_norm).unwrap();
+pub struct FlightData {
+    pub accel_x_1: f64,
+    pub accel_y_1: f64,
+    pub accel_z_1: f64,
+    pub accel_x_2: f64,
+    pub accel_y_2: f64,
+    pub accel_z_2: f64,
 
-    //Kalman matrix initalization
-    type StateVector = SVector<f64, 23>;
-    let mut x = StateVector::zeros();
+    pub roll_1: f64,
+    pub pitch_1: f64,
+    pub yaw_1: f64,
 
-    x[0] = 0.0;
-    x[1] = 0.0;
-    x[2] = 0.0;
-    // 3, 4, 5 = 0 -> Speed
-    // Acceleration
-    x[6] = data.accel_x_1;
-    x[7] = data.accel_y_1;
-    x[8] = data.accel_z_1;
-    // 9, 10, 11 = 0 -> Gyroscop
-    // Quaternions
-    x[12] = q_i2b.w;
-    x[13] = q_i2b.i;
-    x[14] = q_i2b.j;
-    x[15] = q_i2b.k;
-    //Biases, 16, 17, 18, 19, 20, 21 = 0
-    x[22] = 0.0;
+    pub roll_2: f64,
+    pub pitch_2: f64,
+    pub yaw_2: f64,
 
-    let p = SMatrix::<f64, 23, 23>::identity() * 0.1; // covariance
-    let mut q = SMatrix::<f64, 23, 23>::identity() * 0.01; // process noise
-    let mut r = SMatrix::<f64, 10, 10>::identity() * 0.5; // measurment noise
+    pub lat: f64,
+    pub lon: f64,
+    pub alt: f64,
 
-    // old initialization values
-    q[(22, 22)] = 1e-3;
-    r[(0, 0)] = 0.01;
-    r[(1, 1)] = 0.01;
-    r[(2, 2)] = 0.01;
-    r[(9, 9)] = 10_000.0;
-    
-    (
-        NedConvert{x_ref: data.x, y_ref: data.y, z_ref: data.z, lat_ref: data.lat, lon_ref: data.lon},
-        RocketEKF::new(x, p, q, r)
-    )
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+
+    pub pressure: f64,
+}
+
+pub struct RocketEKF {
+    pub state: SVector<f64, 23>,
+    pub p: SMatrix<f64, 23, 23>,
+    pub q: SMatrix<f64, 23, 23>,
+    pub r: SMatrix<f64, 10, 10>,
+    pub baro_needs_sync: bool,
 }
 
 impl RocketEKF {
-    pub fn new(
-        initial_state: SVector<f64, 23>,
-        p: SMatrix<f64, 23, 23>,
-        q: SMatrix<f64, 23, 23>,
-        r: SMatrix<f64, 10, 10>,
-    ) -> Self {
-        Self {
-            state: initial_state,
-            p, // covarianz
-            q, // process noise
-            r, // measurment noise
-            baro_needs_sync: false,
-        }
+    pub fn new(data: &mut FlightData) -> (NedConvert, Self) {
+        let g_ned = Vector3::new(0.0, 0.0, 9.8);
+        let g_body = Vector3::new(data.accel_x_1, data.accel_y_1, data.accel_z_1);
+        let g_ned_norm = g_ned.normalize();
+        let g_body_norm = g_body.normalize();
+    
+        // Quaternion x, y, z, w
+        let q_i2b = UnitQuaternion::rotation_between(&g_ned_norm, &g_body_norm).unwrap();
+    
+        //Kalman matrix initalization
+        type StateVector = SVector<f64, 23>;
+        let mut x = StateVector::zeros();
+    
+        // Position
+        x[0] = 0.0;
+        x[1] = 0.0;
+        x[2] = 0.0;
+        // 3, 4, 5 = 0 -> Speed
+        // Acceleration
+        x[6] = data.accel_x_1;
+        x[7] = data.accel_y_1;
+        x[8] = data.accel_z_1;
+        // 9, 10, 11 = 0 -> Gyroscop
+        // Quaternions
+        x[12] = q_i2b.w;
+        x[13] = q_i2b.i;
+        x[14] = q_i2b.j;
+        x[15] = q_i2b.k;
+        //Biases, 16, 17, 18, 19, 20, 21 = 0
+        x[22] = 0.0;
+    
+        let p = SMatrix::<f64, 23, 23>::identity() * 0.1; // covariance
+        let mut q = SMatrix::<f64, 23, 23>::identity() * 0.01; // process noise
+        let mut r = SMatrix::<f64, 10, 10>::identity() * 0.5; // measurment noise
+    
+        // old initialization values
+        q[(22, 22)] = 1e-3;
+        r[(0, 0)] = 0.01;
+        r[(1, 1)] = 0.01;
+        r[(2, 2)] = 0.01;
+        r[(9, 9)] = 10_000.0;
+    
+        (
+            NedConvert {
+                x_ref: data.x,
+                y_ref: data.y,
+                z_ref: data.z,
+                lat_ref: data.lat,
+                lon_ref: data.lon,
+            },
+            Self {
+                state: x,
+                p,
+                q,
+                r,
+                baro_needs_sync: false,
+            },
+        )
     }
 
-    pub fn predict(&mut self, dt: f64) {
+    fn predict(&mut self, dt: f64) {
         self.p = (&self.p + self.p.transpose()) * 0.5;
         let f = state_transition_jacobian(&self.state, dt);
         self.state = state_transition(&self.state, dt);
@@ -84,7 +116,7 @@ impl RocketEKF {
         let q_norm = normalize_quaternion(q_raw);
         self.state.fixed_rows_mut::<4>(12).copy_from_slice(&q_norm);
     }
-    pub fn update(&mut self, z_measured: &SVector<f64, 10>, mask: &[bool; 10]) {
+    fn update(&mut self, z_measured: &SVector<f64, 10>, mask: &[bool; 10]) {
         let z_pred_full = measurement_function(&self.state, false);
         let h_full = measurement_jacobian(&self.state);
 
@@ -191,6 +223,26 @@ impl RocketEKF {
         self.p = (&self.p + self.p.transpose()) / 2.0;
     }
 }
+
+pub struct FlightManager {
+    pub rocket_started: bool,
+    pub ascent_flag: bool,
+    pub calibration_active: bool,
+    pub calibration_start_time: f64,
+    pub calibration_count: usize,
+    pub last_valid_gps: usize,
+
+    pub z_prev: Option<SVector<f64, 10>>,
+
+    pub accel_gyro_buffer: [[f64; 6]; 20],
+    pub accel_gyro_head: usize,
+    pub accel_gyro_len: usize,
+
+    pub altitude_buffer: [f64; 200],
+    pub altitude_head: usize,
+    pub altitude_len: usize,
+}
+
 impl FlightManager {
     pub fn new() -> Self {
         Self {
@@ -260,7 +312,6 @@ impl FlightManager {
         start_pressure: f64,
         ekf: &mut RocketEKF,
     ) {
-
         data.roll_1 = data.roll_1.to_radians();
         data.pitch_1 = data.pitch_1.to_radians();
         data.yaw_1 = data.yaw_1.to_radians();
@@ -303,7 +354,7 @@ impl FlightManager {
         }
 
         // calibration
-        if self.calibration_active && (current_time - self.calibration_start_time <= 5.0) {
+        if self.calibration_active && (current_time - self.calibration_start_time <= CALIB_TIME) {
             // 5s Dauer
             self.calibration_count += 1;
             ekf.q
@@ -330,7 +381,7 @@ impl FlightManager {
             let mean_alt = self.mean_altitude();
 
             if self.ascent_flag && (ekf.state[2] * 1.05 < mean_alt) {
-                self.ascent_flag = false; 
+                self.ascent_flag = false;
             }
         }
 
