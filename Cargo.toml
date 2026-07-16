@@ -17,7 +17,6 @@ cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-sing
 cortex-m-rt = "0.7.5"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 heapless = { version = "0.9", default-features = false }
-
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-io-async = { version = "0.7.0" }
@@ -33,6 +32,8 @@ hscmrnn030pa = { git = "https://github.com/S2outh/baro-driver.git" }
 phoenix = { git = "ssh://git@github.com/S2outh/phoenix-vibing.git", branch = "dev" }
 
 portable-atomic = "1.13.1"
+libm = "0.2.16"
+nalgebra = { version = "0.35.0", default-features = false, features = ["libm"] }
 
 [profile.dev]
 opt-level = 3
@@ -44,3 +45,4 @@ codegen-units = 16
 [profile.release]
 lto = true
 debug = 2
+

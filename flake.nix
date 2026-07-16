@@ -34,7 +34,7 @@
         profile = pkgs.fenix.complete;
         std-lib = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
         rust-toolchain = pkgs.fenix.combine [
-          profile.rustc-unwrapped
+          profile.rustc
           profile.rust-src
           profile.cargo
           profile.rustfmt
