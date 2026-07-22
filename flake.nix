@@ -5,13 +5,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    fenix = {
-      url = "github:nix-community/fenix/monthly";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    fenix.url = "github:nix-community/fenix/monthly";
     naersk = {
       url = "github:nix-community/naersk";
-      inputs.nixpkgs.follows = "nixpkgs";
       inputs.fenix.follows = "fenix";
     };
   };
@@ -27,18 +23,20 @@
         pkgs = import nixpkgs {
           inherit system;
           overlays = [
-            fenix.overlays.default 
             probe-rs-overlay 
           ];
         };
-        profile = pkgs.fenix.complete;
-        std-lib = pkgs.fenix.targets.thumbv7em-none-eabihf.latest;
-        rust-toolchain = pkgs.fenix.combine [
+        fpkgs = fenix.packages.${system};
+        profile = fpkgs.complete;
+        std-lib = fpkgs.targets.thumbv7em-none-eabihf.latest;
+        rust-analyzer-nightly = fpkgs.rust-analyzer;
+        rust-toolchain = fpkgs.combine [
           profile.rustc
           profile.rust-src
           profile.cargo
           profile.rustfmt
           profile.clippy
+          profile.llvm-tools
           std-lib.rust-std
         ];
       in
@@ -53,6 +51,7 @@
             cargo-edit
             cargo-expand
             cargo-show-asm
+            cargo-binutils
 
             # for flashing
             probe-rs-tools

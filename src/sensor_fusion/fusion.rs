@@ -1,6 +1,6 @@
 use crate::sensor_fusion::math_utils::{
-    NedConvert, measurement_function, measurement_jacobian,
-    normalize_quaternion, state_transition, state_transition_jacobian,
+    NedConvert, measurement_function, measurement_jacobian, normalize_quaternion, state_transition,
+    state_transition_jacobian,
 };
 use nalgebra::{ComplexField, SMatrix, SVector, UnitQuaternion, Vector3};
 
@@ -32,6 +32,31 @@ pub struct FlightData {
 
     pub pressure: f64,
 }
+impl Default for FlightData {
+    fn default() -> Self {
+        Self {
+            accel_x_1: 0.,
+            accel_y_1: 0.,
+            accel_z_1: 0.,
+            accel_x_2: 0.,
+            accel_y_2: 0.,
+            accel_z_2: 0.,
+            roll_1: 0.,
+            pitch_1: 0.,
+            yaw_1: 0.,
+            roll_2: 0.,
+            pitch_2: 0.,
+            yaw_2: 0.,
+            lat: 0.,
+            lon: 0.,
+            alt: 0.,
+            x: 0.,
+            y: 0.,
+            z: 0.,
+            pressure: 0.
+        }
+    }
+}
 
 struct RocketEKF {
     state: SVector<f64, 23>,
@@ -47,14 +72,14 @@ impl RocketEKF {
         let g_body = Vector3::new(data.accel_x_1, data.accel_y_1, data.accel_z_1);
         let g_ned_norm = g_ned.normalize();
         let g_body_norm = g_body.normalize();
-    
+
         // Quaternion x, y, z, w
         let q_i2b = UnitQuaternion::rotation_between(&g_ned_norm, &g_body_norm).unwrap();
-    
+
         //Kalman matrix initalization
         type StateVector = SVector<f64, 23>;
         let mut x = StateVector::zeros();
-    
+
         // Position
         x[0] = 0.0;
         x[1] = 0.0;
@@ -72,18 +97,18 @@ impl RocketEKF {
         x[15] = q_i2b.k;
         //Biases, 16, 17, 18, 19, 20, 21 = 0
         x[22] = 0.0;
-    
+
         let p = SMatrix::<f64, 23, 23>::identity() * 0.1; // covariance
         let mut q = SMatrix::<f64, 23, 23>::identity() * 0.01; // process noise
         let mut r = SMatrix::<f64, 10, 10>::identity() * 0.5; // measurment noise
-    
+
         // old initialization values
         q[(22, 22)] = 1e-3;
         r[(0, 0)] = 0.01;
         r[(1, 1)] = 0.01;
         r[(2, 2)] = 0.01;
         r[(9, 9)] = 10_000.0;
-    
+
         (
             NedConvert {
                 x_ref: data.x,
@@ -224,8 +249,8 @@ impl RocketEKF {
     }
 }
 
-struct FlightManager {
-    rocket_ekf: RocketEKF, 
+pub struct FlightManager {
+    rocket_ekf: RocketEKF,
     rocket_started: bool,
     ascent_flag: bool,
     calibration_active: bool,
@@ -354,7 +379,8 @@ impl FlightManager {
         if self.calibration_active && (current_time - self.calibration_start_time <= CALIB_TIME) {
             // 5s Dauer
             self.calibration_count += 1;
-            self.rocket_ekf.q
+            self.rocket_ekf
+                .q
                 .fixed_view_mut::<4, 4>(12, 12)
                 .copy_from(&(SMatrix::<f64, 4, 4>::identity() * 1e-9));
             for j in 3..6 {

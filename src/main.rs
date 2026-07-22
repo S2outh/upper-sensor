@@ -4,7 +4,7 @@
 mod dts_drv;
 mod embassy_adapter;
 mod sensor_fusion;
-mod sensor_threads;
+mod sensor_tasks;
 use core::{cell::RefCell, sync::atomic::Ordering};
 
 use cortex_m_rt::interrupt;
@@ -39,15 +39,13 @@ use embassy_sync::{
     blocking_mutex::{
         self,
         raw::{CriticalSectionRawMutex, ThreadModeRawMutex},
-    },
-    mutex::Mutex,
-    once_lock::OnceLock,
+    }, mutex::Mutex, once_lock::OnceLock, pubsub::{PubSubChannel, Publisher, Subscriber, WaitResult},
 };
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Delay, Duration, Ticker, Timer};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::Lsm6dsv32;
 use phoenix::{
-    gps::{DataRateInterval, GpsDriver},
+    gps::{DataRateInterval, F40Message, GpsDriver},
     phoenix::{OutputConfig, PhoenixService, StartupConfig, StartupMode},
 };
 use rm3100::driver::RM3100;
@@ -57,12 +55,13 @@ use south_common::{
     definitions::{internal_msgs, telemetry::upper_sensor as tm},
     gen_obdh_types,
     obdh::EmptyFunc,
+    types::{Vector3i16, Vector3i32, upper_sensor::AccelRaw},
 };
 use static_cell::StaticCell;
 
 use crate::{
     dts_drv::DtsDrv,
-    embassy_adapter::{EmbassyClock, EmbassyTimer, LiftoffPin},
+    embassy_adapter::EmbassyClock,
 };
 
 use {defmt_rtt as _, panic_probe as _};
@@ -143,6 +142,24 @@ gen_obdh_types!(UpperSensor, tm);
 // internal messaging channels
 static COM_CHANNELS: UpperSensorComChannels = UpperSensorComChannels::new(4);
 
+// Sensor data channel
+#[derive(Clone)]
+enum SensorData {
+    Accel(u8, AccelRaw),
+    Gyro(u8, Vector3i16),
+    Mag(Vector3i32),
+    Baro(u16),
+    Gps(F40Message),
+}
+const SENS_CHANNEL_PUBS: usize = 5;
+const SENS_CHANNEL_SUBS: usize = 2;
+const MAX_SENS_CHANNEL_LEN: usize = 5;
+
+type SensChannel = PubSubChannel<ThreadModeRawMutex, SensorData, MAX_SENS_CHANNEL_LEN, SENS_CHANNEL_SUBS, SENS_CHANNEL_PUBS>;
+type SensPub = Publisher<'static, ThreadModeRawMutex, SensorData, MAX_SENS_CHANNEL_LEN, SENS_CHANNEL_SUBS, SENS_CHANNEL_PUBS>;
+type SensSub = Subscriber<'static, ThreadModeRawMutex, SensorData, MAX_SENS_CHANNEL_LEN, SENS_CHANNEL_SUBS, SENS_CHANNEL_PUBS>;
+static SENS_CHANNEL: SensChannel = PubSubChannel::new();
+
 // Interrupt pin reference
 static EXTI_INPUT: OnceLock<
     blocking_mutex::Mutex<CriticalSectionRawMutex, RefCell<ExtiInput<'static, Blocking>>>,
@@ -203,7 +220,7 @@ pub async fn can_sender_task(mut can_sender: UpperSensorCanSender) -> ! {
 
 // internal temperature
 #[embassy_executor::task]
-pub async fn dts_thread(tm_sender: UpperSensorTMSender, mut dts: DtsDrv<'static>) {
+pub async fn dts_task(tm_sender: UpperSensorTMSender, mut dts: DtsDrv<'static>) {
     const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
     let mut ticker = Ticker::every(DTS_LOOP_LEN);
     loop {
@@ -212,6 +229,71 @@ pub async fn dts_thread(tm_sender: UpperSensorTMSender, mut dts: DtsDrv<'static>
         tm_sender.send(container).await;
 
         ticker.next().await;
+    }
+}
+
+// relay sensor telemetry
+#[embassy_executor::task]
+pub async fn sensor_tm_task(mut sensor_sub: SensSub, tm_sender: UpperSensorTMSender) -> ! {
+
+    macro_rules! send {
+        ($def: expr, $value:expr) => {{
+            let container = UpperSensorChellUnion::new($def, $value).unwrap();
+            tm_sender.send(container).await;
+        }};
+    }
+
+    loop {
+        let WaitResult::Message(value) = sensor_sub.next_message().await else {
+            defmt::unreachable!();
+        };
+        match value {
+            SensorData::Accel(id, value) => {
+                let chell_def: &'static dyn ChellDefinition
+                    = match id {
+                    1 => &tm::imu1::Accel,
+                    2 => &tm::imu2::Accel,
+                    _ => defmt::unreachable!(),
+                };
+                send!(chell_def, &value);
+            },
+            SensorData::Gyro(id, value) => {
+                let chell_def: &'static dyn ChellDefinition
+                    = match id {
+                    1 => &tm::imu1::Gyro,
+                    2 => &tm::imu2::Gyro,
+                    _ => defmt::unreachable!(),
+                };
+                send!(chell_def, &value);
+            },
+            SensorData::Mag(value) => send!(&tm::Magneto, &value),
+            SensorData::Baro(value) => send!(&tm::Baro, &value),
+            SensorData::Gps(value) => {
+                let state = value.navigation_status | (value.tracked_satellites << 2);
+                send!(&tm::gps::Status, &state);
+
+                const NAV_STATUS_LOCK: u8 = 2;
+                if value.navigation_status < NAV_STATUS_LOCK {
+                    continue;
+                }
+
+                let ecef = Vector3i32 {
+                    x: value.x_wgs84_cm as i32,
+                    y: value.y_wgs84_cm as i32,
+                    z: value.z_wgs84_cm as i32,
+                };
+
+                let vel = Vector3i32 {
+                    x: value.vx_wgs84_1e5_mps as i32,
+                    y: value.vy_wgs84_1e5_mps as i32,
+                    z: value.vz_wgs84_1e5_mps as i32,
+                };
+
+
+                send!(&tm::gps::Pos, &ecef);
+                send!(&tm::gps::Vel, &vel);
+            },
+        }
     }
 }
 
@@ -325,9 +407,9 @@ async fn main(spawner: Spawner) {
     let driver = GpsDriver::<_, _, _, 256>::new(
         uart_rx.into_ring_buffered(S_RX_BUF.init([0; _])),
         uart_tx,
-        EmbassyTimer,
+        Delay,
     );
-    let liftoff = LiftoffPin(Output::new(p.PA0, Level::Low, Speed::Low));
+    let liftoff = Output::new(p.PA0, Level::Low, Speed::Low);
     let phoenix = PhoenixService::new(driver, EmbassyClock, liftoff, startup);
 
     // setup TIC irq
@@ -354,39 +436,43 @@ async fn main(spawner: Spawner) {
 
     // -- Thread spawning
     spawner.spawn(petter(watchdog).unwrap());
-    spawner.spawn(dts_thread(COM_CHANNELS.get_tm_sender(), dts_drv).unwrap());
+    spawner.spawn(dts_task(COM_CHANNELS.get_tm_sender(), dts_drv).unwrap());
 
     Timer::after_millis(STARTUP_DELAY).await;
 
-    // driver threads
+    // driver tasks
     spawner.spawn(
-        sensor_threads::imu_thread(
-            COM_CHANNELS.get_tm_sender(),
+        sensor_tasks::imu_task(
+            1,
+            SENS_CHANNEL.publisher().unwrap(),
             imu1,
             yellow,
-            &tm::imu1::Accel,
-            &tm::imu1::Gyro,
         )
         .unwrap(),
     );
     spawner.spawn(
-        sensor_threads::imu_thread(
-            COM_CHANNELS.get_tm_sender(),
+        sensor_tasks::imu_task(
+            2,
+            SENS_CHANNEL.publisher().unwrap(),
             imu2,
             red,
-            &tm::imu2::Accel,
-            &tm::imu2::Gyro,
         )
         .unwrap(),
     );
-    spawner.spawn(sensor_threads::baro_thread(COM_CHANNELS.get_tm_sender(), baro, blue).unwrap());
     spawner
-        .spawn(sensor_threads::mag_thread(COM_CHANNELS.get_tm_sender(), magneto, green).unwrap());
-    spawner.spawn(sensor_threads::phoenix_thread(COM_CHANNELS.get_tm_sender(), phoenix).unwrap());
+        .spawn(sensor_tasks::baro_task(SENS_CHANNEL.publisher().unwrap(), baro, blue).unwrap());
+    spawner.spawn(
+        sensor_tasks::mag_task(SENS_CHANNEL.publisher().unwrap(), magneto, green).unwrap(),
+    );
+    spawner
+        .spawn(sensor_tasks::phoenix_task(SENS_CHANNEL.publisher().unwrap(), phoenix).unwrap());
 
     spawner.spawn(can_sender_task(can_sender).unwrap());
     spawner.spawn(can_receiver_task(can_receiver).unwrap());
 
-    // wait until all other threads finished (never)
+    spawner.spawn(sensor_tm_task(SENS_CHANNEL.subscriber().unwrap(), COM_CHANNELS.get_tm_sender()).unwrap());
+    spawner.spawn(sensor_fusion::fusion_task(SENS_CHANNEL.subscriber().unwrap()).unwrap());
+
+    // wait until all other tasks finished (never)
     core::future::pending::<()>().await;
 }
