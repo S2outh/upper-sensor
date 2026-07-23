@@ -53,7 +53,7 @@ impl Default for FlightData {
             x: 0.,
             y: 0.,
             z: 0.,
-            pressure: 0.
+            pressure: 0.,
         }
     }
 }

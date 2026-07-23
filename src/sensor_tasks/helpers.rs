@@ -4,6 +4,8 @@ use core::{
     ops::{AddAssign, Div},
 };
 
+use south_common::types::{Vector3i16, Vector3i32, upper_sensor::AccelRaw};
+
 #[derive(Clone)]
 pub struct AccelOvsWrapper(pub [[i64; 3]; 2]);
 impl AddAssign<AccelOvsWrapper> for AccelOvsWrapper {
@@ -16,7 +18,7 @@ impl AddAssign<AccelOvsWrapper> for AccelOvsWrapper {
     }
 }
 impl Div<AccelOvsWrapper> for AccelOvsWrapper {
-    type Output = ([i16; 3], [i16; 3]);
+    type Output = AccelRaw;
     fn div(self, rhs: AccelOvsWrapper) -> Self::Output {
         let mut out = ([0i16; 3], [0i16; 3]);
         for i in 0..3 {
@@ -25,7 +27,7 @@ impl Div<AccelOvsWrapper> for AccelOvsWrapper {
         for i in 0..3 {
             out.1[i] = (self.0[1][i] / rhs.0[1][i]) as i16;
         }
-        out
+        out.into()
     }
 }
 impl TryFrom<usize> for AccelOvsWrapper {
@@ -34,14 +36,20 @@ impl TryFrom<usize> for AccelOvsWrapper {
         Ok(Self(repeat(repeat(value as i64))))
     }
 }
-impl From<([i16; 3], [i16; 3])> for AccelOvsWrapper {
-    fn from(t: ([i16; 3], [i16; 3])) -> Self {
-        Self::from([t.0, t.1])
-    }
-}
-impl From<[[i16; 3]; 2]> for AccelOvsWrapper {
-    fn from(value: [[i16; 3]; 2]) -> Self {
-        Self(value.map(|inner| inner.map(|v| v as i64)))
+impl From<AccelRaw> for AccelOvsWrapper {
+    fn from(t: AccelRaw) -> Self {
+        Self([
+            [
+                t.accel_low_range.x.into(),
+                t.accel_low_range.y.into(),
+                t.accel_low_range.z.into(),
+            ],
+            [
+                t.accel_full_range.x.into(),
+                t.accel_full_range.y.into(),
+                t.accel_full_range.z.into(),
+            ],
+        ])
     }
 }
 
@@ -55,13 +63,13 @@ impl AddAssign<GyroOvsWrapper> for GyroOvsWrapper {
     }
 }
 impl Div<GyroOvsWrapper> for GyroOvsWrapper {
-    type Output = [i16; 3];
+    type Output = Vector3i16;
     fn div(self, rhs: GyroOvsWrapper) -> Self::Output {
         let mut out = [0i16; 3];
         for i in 0..3 {
             out[i] = (self.0[i] / rhs.0[i]) as i16;
         }
-        out
+        out.into()
     }
 }
 impl TryFrom<usize> for GyroOvsWrapper {
@@ -70,9 +78,9 @@ impl TryFrom<usize> for GyroOvsWrapper {
         Ok(Self(repeat(value as i64)))
     }
 }
-impl From<[i16; 3]> for GyroOvsWrapper {
-    fn from(value: [i16; 3]) -> Self {
-        Self(value.map(|v| v as i64))
+impl From<Vector3i16> for GyroOvsWrapper {
+    fn from(t: Vector3i16) -> Self {
+        Self([t.x.into(), t.y.into(), t.z.into()])
     }
 }
 
@@ -86,13 +94,13 @@ impl AddAssign<MagOvsWrapper> for MagOvsWrapper {
     }
 }
 impl Div<MagOvsWrapper> for MagOvsWrapper {
-    type Output = [i32; 3];
+    type Output = Vector3i32;
     fn div(self, rhs: MagOvsWrapper) -> Self::Output {
         let mut out = [0i32; 3];
         for i in 0..3 {
             out[i] = (self.0[i] / rhs.0[i]) as i32;
         }
-        out
+        out.into()
     }
 }
 impl TryFrom<usize> for MagOvsWrapper {
@@ -101,8 +109,8 @@ impl TryFrom<usize> for MagOvsWrapper {
         Ok(Self(repeat(value as i64)))
     }
 }
-impl From<[i32; 3]> for MagOvsWrapper {
-    fn from(value: [i32; 3]) -> Self {
-        Self(value.map(|v| v as i64))
+impl From<Vector3i32> for MagOvsWrapper {
+    fn from(t: Vector3i32) -> Self {
+        Self([t.x.into(), t.y.into(), t.z.into()])
     }
 }

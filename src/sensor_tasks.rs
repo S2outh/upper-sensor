@@ -1,4 +1,4 @@
-mod helpers;
+pub mod helpers;
 
 use defmt::{Debug2Format, error, info, warn};
 use embassy_stm32::{
@@ -12,17 +12,11 @@ use embassy_time::{Delay, Duration, Ticker};
 use hscmrnn030pa::driver::Baro;
 use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6dsv32};
 
-use phoenix::{
-    phoenix::{PhoenixEvent, PhoenixService},
-};
+use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use rm3100::driver::RM3100;
-use south_common::{
-    utils::Oversampeling,
-};
+use south_common::utils::Oversampeling;
 
-use crate::{
-    Irqs, SensPub, SensorData, embassy_adapter::EmbassyClock,
-};
+use crate::{Irqs, SensPub, SensorData, embassy_adapter::EmbassyClock};
 
 use helpers::*;
 
@@ -49,20 +43,17 @@ pub async fn baro_task(
 
 // mag polling task
 #[embassy_executor::task]
-pub async fn mag_task(
-    sender: SensPub,
-    mut mag: RM3100<'static>,
-    mut led: Output<'static>,
-) {
+pub async fn mag_task(sender: SensPub, mut mag: RM3100<'static>, mut led: Output<'static>) {
     // mag is configured for 18 Hz
     // software oversampeling 9 values
     // => 2 Hz
-    let mut mag_oversampeler = Oversampeling::new(9, MagOvsWrapper([0i64; 3]));
+    const NUM_SAMPLES: usize = 9;
+    let mut mag_oversampeler = Oversampeling::new(NUM_SAMPLES, MagOvsWrapper([0i64; 3]));
     loop {
         match mag.read_data_when_ready_interrupt().await {
             Ok(data) => {
-                if let Some(value) = mag_oversampeler.insert(data) {
-                    sender.publish(SensorData::Mag(value.into())).await;
+                if let Some(value) = mag_oversampeler.insert(data.into()) {
+                    sender.publish(SensorData::Mag(value)).await;
                 }
             }
             Err(e) => error!("could not read magneto: {}", e),
@@ -88,8 +79,9 @@ pub async fn imu_task(
     // Imu is configured for 1.92 KHz ODR
     // software oversampeling 20 values
     // => 96 Hz
-    let mut accel_oversampeler = Oversampeling::new(20, AccelOvsWrapper([[0i64; 3]; 2]));
-    let mut gyro_oversampeler = Oversampeling::new(20, GyroOvsWrapper([0i64; 3]));
+    const NUM_SAMPLES: usize = 20;
+    let mut accel_oversampeler = Oversampeling::new(NUM_SAMPLES, AccelOvsWrapper([[0i64; 3]; 2]));
+    let mut gyro_oversampeler = Oversampeling::new(NUM_SAMPLES, GyroOvsWrapper([0i64; 3]));
 
     loop {
         if let Err(e) = imu
@@ -107,8 +99,8 @@ pub async fn imu_task(
 
         match imu.read_accel_dual_raw().await {
             Ok(data) => {
-                if let Some(value) = accel_oversampeler.insert(data) {
-                    sender.publish(SensorData::Accel(id, value.into())).await;
+                if let Some(value) = accel_oversampeler.insert(data.into()) {
+                    sender.publish(SensorData::Accel(id, value)).await;
                 }
             }
             Err(e) => error!("could not read accel: {}", e),
@@ -116,8 +108,8 @@ pub async fn imu_task(
 
         match imu.read_gyro_raw().await {
             Ok(data) => {
-                if let Some(value) = gyro_oversampeler.insert(data) {
-                    sender.publish(SensorData::Gyro(id, value.into())).await;
+                if let Some(value) = gyro_oversampeler.insert(data.into()) {
+                    sender.publish(SensorData::Gyro(id, value)).await;
                 }
             }
             Err(e) => error!("could not read gyro: {}", e),
