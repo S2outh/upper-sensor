@@ -56,7 +56,7 @@ use rm3100::driver::RM3100;
 use south_common::{
     chell::ChellDefinition,
     configs::{can_config::CanPeriphConfig, mag_config},
-    definitions::{internal_msgs, telemetry::upper_sensor as tm},
+    definitions::telemetry::upper_sensor as tm,
     gen_obdh_types,
     obdh::EmptyFunc,
     types::{Vector3i16, Vector3i32, upper_sensor::AccelRaw},
@@ -246,13 +246,13 @@ pub async fn can_sender_task(mut can_sender: UpperSensorCanSender) -> ! {
 
 // internal temperature
 #[embassy_executor::task]
-pub async fn dts_task(tm_sender: UpperSensorTMSender, mut dts: DtsDrv<'static>) {
+pub async fn dts_task(com_channels: &'static UpperSensorComChannels, mut dts: DtsDrv<'static>) {
     const DTS_LOOP_LEN: Duration = Duration::from_millis(1000);
     let mut ticker = Ticker::every(DTS_LOOP_LEN);
     loop {
         let temp = dts.read_tenth_deg().await;
         let container = UpperSensorChellUnion::new(&tm::InternalTemperature, &temp).unwrap();
-        tm_sender.send(container).await;
+        com_channels.send_tm(container).await;
 
         ticker.next().await;
     }
@@ -260,11 +260,14 @@ pub async fn dts_task(tm_sender: UpperSensorTMSender, mut dts: DtsDrv<'static>) 
 
 // relay sensor telemetry
 #[embassy_executor::task]
-pub async fn sensor_tm_task(mut sensor_sub: SensSub, tm_sender: UpperSensorTMSender) -> ! {
+pub async fn sensor_tm_task(
+    mut sensor_sub: SensSub,
+    com_channels: &'static UpperSensorComChannels,
+) -> ! {
     macro_rules! send {
         ($def: expr, $value:expr) => {{
             let container = UpperSensorChellUnion::new($def, $value).unwrap();
-            tm_sender.send(container).await;
+            com_channels.send_tm(container).await;
         }};
     }
 
@@ -354,21 +357,14 @@ async fn main(spawner: Spawner) {
 
     // -- CAN configuration
     // can 1 configuration
-    let mut can_configurator =
-        CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
+    let can_configurator = CanPeriphConfig::new(CanConfigurator::new(p.FDCAN1, p.PD0, p.PD1, Irqs));
 
     // can 2 configuration
-    // let mut can_configurator =
+    // let can_configurator =
     //     CanPeriphConfig::new(CanConfigurator::new(p.FDCAN2, p.PB12, p.PB13, Irqs));
 
     let _can_1_standby = Output::new(p.PE2, Level::Low, Speed::Low);
     // let _can_2_standby = Output::new(p.PE3, Level::Low, Speed::Low);
-
-    can_configurator
-        .add_receive_topic(internal_msgs::Telecommand.id())
-        .unwrap()
-        .add_receive_topic(internal_msgs::TimesyncRequest.id())
-        .unwrap();
 
     let can_instance = can_configurator.activate(
         C_TX_BUF.init(TxFdBuf::<C_TX_BUF_SIZE>::new()),
@@ -475,7 +471,7 @@ async fn main(spawner: Spawner) {
 
     // -- Thread spawning
     spawner.spawn(petter(watchdog).unwrap());
-    spawner.spawn(dts_task(COM_CHANNELS.get_tm_sender(), dts_drv).unwrap());
+    spawner.spawn(dts_task(&COM_CHANNELS, dts_drv).unwrap());
 
     Timer::after_millis(STARTUP_DELAY).await;
 
@@ -491,13 +487,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(can_sender_task(can_sender).unwrap());
     spawner.spawn(can_receiver_task(can_receiver).unwrap());
 
-    spawner.spawn(
-        sensor_tm_task(
-            SENS_CHANNEL.subscriber().unwrap(),
-            COM_CHANNELS.get_tm_sender(),
-        )
-        .unwrap(),
-    );
+    spawner.spawn(sensor_tm_task(SENS_CHANNEL.subscriber().unwrap(), &COM_CHANNELS).unwrap());
     spawner.spawn(sensor_fusion::fusion_task(SENS_CHANNEL.subscriber().unwrap()).unwrap());
 
     // wait until all other tasks finished (never)
