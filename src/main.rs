@@ -59,7 +59,7 @@ use south_common::{
     definitions::telemetry::upper_sensor as tm,
     gen_obdh_types,
     obdh::EmptyFunc,
-    types::{Vector3i16, Vector3i32, upper_sensor::AccelRaw},
+    types::upper_sensor::AccelRaw,
     utils::Oversampeling,
 };
 use static_cell::StaticCell;
@@ -69,6 +69,7 @@ use crate::{
     embassy_adapter::EmbassyClock,
     sensor_tasks::helpers::{AccelOvsWrapper, GyroOvsWrapper},
 };
+use nalgebra as na;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -157,8 +158,8 @@ static COM_CHANNELS: UpperSensorComChannels = UpperSensorComChannels::new(4);
 #[derive(Clone)]
 enum SensorData {
     Accel(u8, AccelRaw),
-    Gyro(u8, Vector3i16),
-    Mag(Vector3i32),
+    Gyro(u8, na::Vector3<i16>),
+    Mag(na::Vector3<i32>),
     Baro(u16),
     Gps(F40Message),
 }
@@ -325,17 +326,17 @@ pub async fn sensor_tm_task(
                     continue;
                 }
 
-                let ecef = Vector3i32 {
-                    x: value.x_wgs84_cm as i32,
-                    y: value.y_wgs84_cm as i32,
-                    z: value.z_wgs84_cm as i32,
-                };
+                let ecef = na::Vector3::new(
+                    value.x_wgs84_cm as i32,
+                    value.y_wgs84_cm as i32,
+                    value.z_wgs84_cm as i32,
+                );
 
-                let vel = Vector3i32 {
-                    x: value.vx_wgs84_1e5_mps as i32,
-                    y: value.vy_wgs84_1e5_mps as i32,
-                    z: value.vz_wgs84_1e5_mps as i32,
-                };
+                let vel = na::Vector3::new(
+                    value.vx_wgs84_1e5_mps as i32,
+                    value.vy_wgs84_1e5_mps as i32,
+                    value.vz_wgs84_1e5_mps as i32,
+                );
 
                 send!(&tm::gps::Pos, &ecef);
                 send!(&tm::gps::Vel, &vel);

@@ -1,6 +1,7 @@
 use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Instant, TICK_HZ};
-use south_common::{chell::ParsableChellValue, types::Vector3i32};
+use south_common::chell::ParsableChellValue;
+use nalgebra as na;
 
 use crate::{
     SensSub, SensorData,
@@ -31,11 +32,12 @@ async fn get_init_data(sensor_sub: &mut SensSub) -> FlightData {
                     continue;
                 }
 
-                let ecef = Vector3i32 {
-                    x: value.x_wgs84_cm as i32,
-                    y: value.y_wgs84_cm as i32,
-                    z: value.z_wgs84_cm as i32,
-                };
+                let ecef = na::Vector3::new(
+                    value.x_wgs84_cm as i32,
+                    value.y_wgs84_cm as i32,
+                    value.z_wgs84_cm as i32,
+                );
+
                 let ecef_m = ecef.parser(tm::gps::Pos).m();
                 let llh = ecef.parser(tm::gps::Pos).llh();
 
@@ -104,11 +106,11 @@ fn populate_flight_data(value: SensorData, ned_convert: &NedConvert) -> Result<F
                 return Err(());
             }
 
-            let ecef = Vector3i32 {
-                x: value.x_wgs84_cm as i32,
-                y: value.y_wgs84_cm as i32,
-                z: value.z_wgs84_cm as i32,
-            };
+            let ecef = na::Vector3::new(
+                value.x_wgs84_cm as i32,
+                value.y_wgs84_cm as i32,
+                value.z_wgs84_cm as i32,
+            );
             let ecef_m = ecef.parser(tm::gps::Pos).m();
             let ned = ecef_to_ned(ecef_m.x, ecef_m.y, ecef_m.z, &ned_convert);
             let llh = ecef.parser(tm::gps::Pos).llh();

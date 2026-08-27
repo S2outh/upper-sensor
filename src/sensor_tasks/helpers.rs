@@ -4,7 +4,8 @@ use core::{
     ops::{AddAssign, Div},
 };
 
-use south_common::types::{Vector3i16, Vector3i32, upper_sensor::AccelRaw};
+use south_common::types::upper_sensor::AccelRaw;
+use nalgebra as na;
 
 #[derive(Clone)]
 pub struct AccelOvsWrapper(pub [[i64; 3]; 2]);
@@ -63,7 +64,7 @@ impl AddAssign<GyroOvsWrapper> for GyroOvsWrapper {
     }
 }
 impl Div<GyroOvsWrapper> for GyroOvsWrapper {
-    type Output = Vector3i16;
+    type Output = na::Vector3<i16>;
     fn div(self, rhs: GyroOvsWrapper) -> Self::Output {
         let mut out = [0i16; 3];
         for i in 0..3 {
@@ -78,8 +79,8 @@ impl TryFrom<usize> for GyroOvsWrapper {
         Ok(Self(repeat(value as i64)))
     }
 }
-impl From<Vector3i16> for GyroOvsWrapper {
-    fn from(t: Vector3i16) -> Self {
+impl From<na::Vector3<i16>> for GyroOvsWrapper {
+    fn from(t: na::Vector3<i16>) -> Self {
         Self([t.x.into(), t.y.into(), t.z.into()])
     }
 }
@@ -94,7 +95,7 @@ impl AddAssign<MagOvsWrapper> for MagOvsWrapper {
     }
 }
 impl Div<MagOvsWrapper> for MagOvsWrapper {
-    type Output = Vector3i32;
+    type Output = na::Vector3<i32>;
     fn div(self, rhs: MagOvsWrapper) -> Self::Output {
         let mut out = [0i32; 3];
         for i in 0..3 {
@@ -109,8 +110,8 @@ impl TryFrom<usize> for MagOvsWrapper {
         Ok(Self(repeat(value as i64)))
     }
 }
-impl From<Vector3i32> for MagOvsWrapper {
-    fn from(t: Vector3i32) -> Self {
+impl From<na::Vector3<i32>> for MagOvsWrapper {
+    fn from(t: na::Vector3<i32>) -> Self {
         Self([t.x.into(), t.y.into(), t.z.into()])
     }
 }
