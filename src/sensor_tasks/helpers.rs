@@ -4,8 +4,8 @@ use core::{
     ops::{AddAssign, Div},
 };
 
-use south_common::types::upper_sensor::AccelRaw;
 use nalgebra as na;
+use south_common::types::upper_sensor::AccelRaw;
 
 #[derive(Clone)]
 pub struct AccelOvsWrapper(pub [[i64; 3]; 2]);

@@ -14,9 +14,8 @@ use lsm6dsv32::driver::{FifoDisabled, Int1Disabled, Int2Disabled, LogicOp, Lsm6d
 
 use phoenix::phoenix::{PhoenixEvent, PhoenixService};
 use rm3100::driver::RM3100;
-use south_common::utils::Oversampeling;
 
-use crate::{Irqs, SensPub, SensorData, embassy_adapter::EmbassyClock};
+use crate::{Irqs, utils::Oversampeling, SensPub, SensorData, embassy_adapter::EmbassyClock};
 
 use helpers::*;
 

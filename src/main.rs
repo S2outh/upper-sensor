@@ -6,6 +6,8 @@ mod dts_drv;
 mod embassy_adapter;
 mod sensor_fusion;
 mod sensor_tasks;
+mod utils;
+
 use core::{array::from_fn, cell::RefCell, sync::atomic::Ordering};
 
 use cortex_m_rt::interrupt;
@@ -60,7 +62,6 @@ use south_common::{
     gen_obdh_types,
     obdh::EmptyFunc,
     types::upper_sensor::AccelRaw,
-    utils::Oversampeling,
 };
 use static_cell::StaticCell;
 
@@ -68,6 +69,7 @@ use crate::{
     dts_drv::DtsDrv,
     embassy_adapter::EmbassyClock,
     sensor_tasks::helpers::{AccelOvsWrapper, GyroOvsWrapper},
+    utils::Oversampeling,
 };
 use nalgebra as na;
 
@@ -129,7 +131,7 @@ fn get_rcc_config() -> rcc::Config {
 
     rcc_config.voltage_scale = rcc::VoltageScale::Scale2; // voltage scale for max 300 MHz Pll out
 
-    rcc_config.ahb_pre = rcc::AHBPrescaler::DIV2;  // AHB runns at 120 MHz (src: sysclk)
+    rcc_config.ahb_pre = rcc::AHBPrescaler::DIV2; // AHB runns at 120 MHz (src: sysclk)
     rcc_config.apb1_pre = rcc::APBPrescaler::DIV2; // APB 1-4 all run with 60 MHz (src: ahb)
     rcc_config.apb2_pre = rcc::APBPrescaler::DIV2;
     rcc_config.apb3_pre = rcc::APBPrescaler::DIV2;
@@ -204,15 +206,11 @@ static SPI_MAG: StaticCell<Mutex<ThreadModeRawMutex, Spi<'static, Async, Master>
     StaticCell::new();
 
 // can configuration
-const C_RX_BUF_SIZE: usize = 64;
-const C_TX_BUF_SIZE: usize = 64;
-
-static C_RX_BUF: StaticCell<RxFdBuf<C_RX_BUF_SIZE>> = StaticCell::new();
-static C_TX_BUF: StaticCell<TxFdBuf<C_TX_BUF_SIZE>> = StaticCell::new();
+static C_RX_BUF: StaticCell<RxFdBuf<64>> = StaticCell::new();
+static C_TX_BUF: StaticCell<TxFdBuf<256>> = StaticCell::new();
 
 // Static uart buffer
-const S_RX_BUF_SIZE: usize = 256;
-static S_RX_BUF: StaticCell<[u8; S_RX_BUF_SIZE]> = StaticCell::new();
+static S_RX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 
 /// IRQS for time ref update. Fires on every integer second with guaranteed < 1us accuracy
 /// (0.2us on average)
@@ -372,10 +370,8 @@ async fn main(spawner: Spawner) {
     let _can_1_standby = Output::new(p.PE2, Level::Low, Speed::Low);
     // let _can_2_standby = Output::new(p.PE3, Level::Low, Speed::Low);
 
-    let can_instance = can_configurator.activate(
-        C_TX_BUF.init(TxFdBuf::<C_TX_BUF_SIZE>::new()),
-        C_RX_BUF.init(RxFdBuf::<C_RX_BUF_SIZE>::new()),
-    );
+    let can_instance =
+        can_configurator.activate(C_TX_BUF.init(TxFdBuf::new()), C_RX_BUF.init(RxFdBuf::new()));
 
     // Setup can sender and receiver runners
     let can_receiver = UpperSensorCanReceiver::new(can_instance.reader(), &COM_CHANNELS, EmptyFunc);

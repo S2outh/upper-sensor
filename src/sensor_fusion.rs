@@ -1,7 +1,7 @@
 use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Instant, TICK_HZ};
-use south_common::chell::ParsableChellValue;
 use nalgebra as na;
+use south_common::chell::ParsableChellValue;
 
 use crate::{
     SensSub, SensorData,
